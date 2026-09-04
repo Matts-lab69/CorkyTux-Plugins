@@ -2,7 +2,7 @@
   "name": "DLL Overrides Automator",
   "version": "1.1.0",
   "entry": "dll-overrides-automator",
-  "description": "Automatic DLL-overrides configuration for Windows games. Scans game directories, generates WINEDLLOVERRIDES, and manages DLL patching for multiplayer fix compatibility.",
+  "description": "Automatically configures DLL overrides for Windows games. Scans game directories, generates WINEDLLOVERRIDES, and manages DLL patching when your game needs custom DLLs.",
   "capabilities": ["scan", "patch", "unpatch", "status", "install"],
   "protocol": {
     "stdout": "single JSON document per invocation",
