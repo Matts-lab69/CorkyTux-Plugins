@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""fix-onlinefix-freetp — CorkyTux plugin (v1.0.0).
+"""DLL Variables Automator — CorkyTux plugin (v1.1.0).
 
-Automatic DLL-overrides loader for OnlineFix / FreeTP games.
-Extirpated 1:1 from CorkyTux Java core (FixParser.parseDlls,
-FtpInstaller.install, FtpPathHandler). See ~/FIX-ONLINEFIX-FREETP.txt.
+Automatic DLL-overrides configuration for Windows games.
+Scans game directories, generates WINEDLLOVERRIDES, and manages
+DLL patching/unpatching for multiplayer fix compatibility.
 
 Usage:
   fix-onlinefix-freetp scan <gamedir>
-  fix-onlinefix-freetp patch <fixdir>      # deploy ftpPath over steamfix dlls
+  fix-onlinefix-freetp patch <fixdir>      # deploy vendor DLLs over steamfix dlls
   fix-onlinefix-freetp unpatch <fixdir>    # restore *.noofllpath backups
   fix-onlinefix-freetp status <fixdir>     # patched state
   fix-onlinefix-freetp install --game NAME --prefix P --installdir D [--proton P] installer.exe [installer2...]
@@ -15,7 +15,7 @@ Usage:
 Every command prints ONE JSON document on stdout. Exit codes: 0 ok,
 2 usage/invalid path, 3 install failed.
 
-Side effects (documented, mirrors Java):
+Side effects:
   - scan on steamfix.ini WITHOUT [OnlineFix Linux]: writes
     [Main].RealAppId=<fake> and creates [OnlineFix Linux].RealAppId=<old>,
     plus ExtraProtection=false under [Misc] when that key exists.
