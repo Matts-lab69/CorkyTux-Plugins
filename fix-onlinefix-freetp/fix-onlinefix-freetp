@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""fix-onlinefix-freetp — CorkyTux plugin (v1.0.0).
+
+Automatic DLL-overrides loader for OnlineFix / FreeTP games.
+Extirpated 1:1 from CorkyTux Java core (FixParser.parseDlls,
+FtpInstaller.install, FtpPathHandler). See ~/FIX-ONLINEFIX-FREETP.txt.
+
+Usage:
+  fix-onlinefix-freetp scan <gamedir>
+  fix-onlinefix-freetp patch <fixdir>      # deploy ftpPath over steamfix dlls
+  fix-onlinefix-freetp unpatch <fixdir>    # restore *.noofllpath backups
+  fix-onlinefix-freetp status <fixdir>     # patched state
+  fix-onlinefix-freetp install --game NAME --prefix P --installdir D [--proton P] installer.exe [installer2...]
+
+Every command prints ONE JSON document on stdout. Exit codes: 0 ok,
+2 usage/invalid path, 3 install failed.
+
+Side effects (documented, mirrors Java):
+  - scan on steamfix.ini WITHOUT [OnlineFix Linux]: writes
+    [Main].RealAppId=<fake> and creates [OnlineFix Linux].RealAppId=<old>,
+    plus ExtraProtection=false under [Misc] when that key exists.
+  - scan with launch_data/onlinefix.json: copies/symlinks Newtonsoft.Json.dll
+    next to Launcher.exe when missing there.
+  - patch: moves steamfix*.dll to *.noofllpath, deploys vendor ftpPath dlls.
+  - install: runs proton on installers; rm -rf of prefix on failure.
+"""
+import configparser
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+VENDOR = os.path.join(HERE, "vendor")
+BACKUP_SUFFIX = ".noofllpath"
+
+DLL_SCAN = re.compile(
+    r"^(emp|custom)\.dll$|^win.*\.dll$|^(online|steam).*\.(dll|ini|json)$"
+    r"|^eos.*\.dll$|^epicfix.*\.dll$|^(winmm|dlllist)\.txt$|^launch_data\.of.*$",
+    re.IGNORECASE)
+TXT_RE = re.compile(r"^(winmm|dlllist)\.txt$", re.IGNORECASE)
+INI_RE = re.compile(r"^(online|steam)fix\.ini$", re.IGNORECASE)
+STEAMFIX_RE = re.compile(r"^steamfix.*\.dll", re.IGNORECASE)
+LAUNCH_RE = re.compile(r"^launch_data\.of.*$|^onlinefix\.json$", re.IGNORECASE)
+WIN_DLL_RE = re.compile(r"^win.*\.dll$", re.IGNORECASE)
+
+
+def err(msg, code=2):
+    print(json.dumps({"ok": False, "error": msg}))
+    sys.exit(code)
+
+
+def walk_files(root):
+    out = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            out.append(os.path.join(dirpath, fn))
+    return out
+
+
+def read_ini(path):
+    cp = configparser.ConfigParser()
+    cp.optionxform = str  # case-sensitive keys like ini4j
+    cp.read(path, encoding="utf-8")
+    return cp
+
+
+def write_ini(cp, path):
+    with open(path, "w", encoding="utf-8") as f:
+        cp.write(f)
+
+
+def scan(game_dir):
+    if not os.path.isdir(game_dir):
+        err("not a directory: %s" % game_dir)
+    files = [p for p in walk_files(game_dir)
+             if DLL_SCAN.match(os.path.basename(p))]
+    overrides = []
+    seen_blob = ""
+    real_app_id = None
+    fake_app_id = None
+    fix_path = None
+    patched_files = []
+    warnings = []
+
+    def add_override(base, suffix):
+        nonlocal seen_blob
+        # mirrors Java: substring check on the whole built string (case-insensitive)
+        if base.lower() not in seen_blob.lower():
+            seen_blob += base.lower()
+            overrides.append("%s%s;" % (base, suffix))
+
+    for path in files:
+        fname = os.path.basename(path)
+        # a) winmm.txt / dlllist.txt: each .dll line is an override
+        if TXT_RE.match(fname):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError as e:
+                warnings.append("cannot read %s: %s" % (path, e))
+                continue
+            for line in content.split("\n"):
+                t = line.strip()
+                if not t or "." not in t:
+                    continue
+                if t.rsplit(".", 1)[1].lower() != "dll":
+                    continue
+                base = os.path.basename(t.replace("\\", "/"))
+                base = base[:base.rfind(".")].lower()
+                add_override(base, "=n")
+            continue
+        # b) onlinefix.ini / steamfix.ini
+        if INI_RE.match(fname):
+            try:
+                cp = read_ini(path)
+                real = None
+                if cp.has_section("OnlineFix Linux"):
+                    real = cp.get("OnlineFix Linux", "RealAppId", fallback=None)
+                if real is None and cp.has_section("Main"):
+                    real = cp.get("Main", "RealAppId", fallback=None)
+                real_app_id = real
+                fake = cp.get("Main", "FakeAppId", fallback=None) \
+                    if cp.has_section("Main") else None
+                fake_app_id = fake
+                changed = False
+                # FreeTP patch: steamfix.ini without [OnlineFix Linux]
+                if fname.lower() == "steamfix.ini" and not cp.has_section("OnlineFix Linux"):
+                    if not cp.has_section("Main"):
+                        cp.add_section("Main")
+                    cp.set("Main", "RealAppId", fake if fake is not None else "")
+                    cp.add_section("OnlineFix Linux")
+                    cp.set("OnlineFix Linux", "RealAppId",
+                           real if real is not None else "")
+                    changed = True
+                    patched_files.append(path + " [FreeTP patch]")
+                # ExtraProtection -> false (only when key exists)
+                if cp.has_section("Misc") and cp.has_option("Misc", "ExtraProtection"):
+                    if cp.get("Misc", "ExtraProtection") != "false":
+                        cp.set("Misc", "ExtraProtection", "false")
+                        changed = True
+                if changed:
+                    write_ini(cp, path)
+            except Exception as e:  # configparser.Error etc.
+                warnings.append("cannot parse ini %s: %s" % (path, e))
+            continue
+        # c) steamfix*.dll (find): remember parent dir
+        if STEAMFIX_RE.search(fname):
+            parent = os.path.dirname(path)
+            if parent:
+                fix_path = parent
+            continue
+        # d) launch_data.of* / onlinefix.json (Photon/Newtonsoft repair)
+        if LAUNCH_RE.match(fname):
+            parent = os.path.dirname(path)
+            # JSON readability check (Jackson fallback equivalent)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    json.load(f)
+            except Exception:
+                pass  # not JSON or binary: non-fatal, like Java
+            launcher_exe = os.path.join(parent, "Launcher.exe")
+            newton_dst = os.path.join(parent, "Newtonsoft.Json.dll")
+            if os.path.isfile(launcher_exe) and not os.path.isfile(newton_dst):
+                # search Newtonsoft.Json.dll elsewhere under the game dir,
+                # skipping symlinks (mirrors the canonical-path guard)
+                found = []
+                for p in walk_files(game_dir):
+                    if os.path.basename(p) != "Newtonsoft.Json.dll":
+                        continue
+                    try:
+                        if os.path.islink(p):
+                            continue
+                    except OSError:
+                        continue
+                    if os.path.dirname(p) == parent:
+                        continue
+                    if os.path.exists(os.path.join(parent, os.path.basename(p))):
+                        continue
+                    found.append(p)
+                if not found:
+                    vendor = os.path.join(VENDOR, "Newtonsoft.Json.dll")
+                    if os.path.isfile(vendor):
+                        shutil.copy2(vendor, newton_dst)
+                        patched_files.append(newton_dst + " [vendor copy]")
+                    else:
+                        warnings.append("Newtonsoft.Json.dll not found (no vendor copy)")
+                else:
+                    for src in found:
+                        dst = os.path.join(parent, os.path.basename(src))
+                        try:
+                            os.symlink(src, dst)
+                            patched_files.append(dst + " [symlink]")
+                        except OSError as e:
+                            warnings.append("symlink failed %s: %s" % (dst, e))
+            continue
+        # e) default dll handling
+        base = fname[:fname.rfind(".")].lower() if "." in fname else fname.lower()
+        add_override(base, "=n,b" if WIN_DLL_RE.match(fname) else "=n")
+
+    result = {
+        "ok": True,
+        "overrides": "".join(overrides).rstrip(";"),
+        "realAppId": real_app_id,
+        "fakeAppId": fake_app_id,
+        "fixPath": fix_path,
+        "patchedFiles": patched_files,
+        "warnings": warnings,
+    }
+    print(json.dumps(result))
+    return 0
+
+
+def find_steamfix_dlls(fixdir):
+    out = []
+    try:
+        for fn in sorted(os.listdir(fixdir)):
+            if re.search(r"^steamfix.*\.dll", fn, re.IGNORECASE) \
+                    and os.path.isfile(os.path.join(fixdir, fn)):
+                out.append(os.path.join(fixdir, fn))
+    except OSError:
+        pass
+    return out
+
+
+def vendor_dll(dll_path):
+    return os.path.join(VENDOR, "ftpPath32.dll") \
+        if os.path.basename(dll_path).lower().endswith("32.dll") \
+        else os.path.join(VENDOR, "ftpPath64.dll")
+
+
+def cmd_patch(fixdir):
+    if not os.path.isdir(fixdir):
+        err("not a directory: %s" % fixdir)
+    dlls = find_steamfix_dlls(fixdir)
+    if not dlls:
+        print(json.dumps({"ok": False, "error": "no steamfix dlls in %s" % fixdir}))
+        sys.exit(2)
+    patched, failed = [], []
+    for dll in dlls:
+        backup = dll + BACKUP_SUFFIX
+        try:
+            if os.path.exists(backup):
+                os.replace(dll, backup)
+            else:
+                os.rename(dll, backup)
+            src = vendor_dll(dll)
+            shutil.copy2(src, dll)
+            patched.append(dll)
+        except OSError as e:
+            failed.append("%s: %s" % (dll, e))
+            try:  # restore backup on failure (mirrors Java)
+                if os.path.isfile(backup):
+                    os.replace(backup, dll)
+            except OSError:
+                pass
+    print(json.dumps({"ok": not failed and bool(patched),
+                      "patched": patched, "failed": failed}))
+    return 0 if (patched and not failed) else 2
+
+
+def cmd_unpatch(fixdir):
+    if not os.path.isdir(fixdir):
+        err("not a directory: %s" % fixdir)
+    restored, missing = [], []
+    for fn in sorted(os.listdir(fixdir)):
+        if not fn.endswith(BACKUP_SUFFIX):
+            continue
+        backup = os.path.join(fixdir, fn)
+        dll = backup[: -len(BACKUP_SUFFIX)]
+        # only restore pairs this plugin deployed (sibling deployed dll exists)
+        try:
+            if os.path.isfile(dll):
+                os.remove(dll)
+            if os.path.isfile(backup):
+                os.rename(backup, dll)
+                restored.append(dll)
+            else:
+                missing.append(fn)
+        except OSError as e:
+            missing.append("%s: %s" % (fn, e))
+    print(json.dumps({"ok": True, "restored": restored, "missing": missing}))
+    return 0
+
+
+def cmd_status(fixdir):
+    if not os.path.isdir(fixdir):
+        err("not a directory: %s" % fixdir)
+    dlls = find_steamfix_dlls(fixdir)
+    backups = sorted(os.path.join(fixdir, fn) for fn in os.listdir(fixdir)
+                     if fn.endswith(BACKUP_SUFFIX) and os.path.isfile(os.path.join(fixdir, fn)))
+    print(json.dumps({"ok": True, "dlls": dlls, "backups": backups,
+                      "patched": bool(backups)}))
+    return 0
+
+
+def to_windows_path(path):
+    if not path:
+        return "Z:\\"
+    return "Z:" + path.replace("/", "\\")
+
+
+def find_proton(explicit=None):
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    home = os.path.expanduser("~")
+    candidates = []
+    for base in (os.path.join(home, ".local/share/CorkyTux/protons"),
+                 os.path.join(home, ".local/share/Steam/compatibilitytools.d"),
+                 os.path.join(home, ".steam/steam/compatibilitytools.d")):
+        if not os.path.isdir(base):
+            continue
+        for entry in sorted(os.listdir(base)):
+            p = os.path.join(base, entry, "proton")
+            if os.path.isfile(p):
+                candidates.append((os.path.getmtime(os.path.join(base, entry)), p))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[-1][1]
+
+
+def steam_client_path():
+    home = os.path.expanduser("~")
+    native = os.path.join(home, ".steam/steam")
+    if os.path.isdir(native):
+        return native
+    flatpak = os.path.join(home, ".var/app/com.valvesoftware.Steam/data/Steam")
+    return flatpak  # fallback even if missing (mirrors Java)
+
+
+def cmd_install(args):
+    import argparse
+    ap = argparse.ArgumentParser(prog="fix-onlinefix-freetp install")
+    ap.add_argument("--game", required=True)
+    ap.add_argument("--prefix", required=True)
+    ap.add_argument("--installdir", required=True)
+    ap.add_argument("--proton", default=None)
+    ap.add_argument("--clean", action="store_true")
+    ap.add_argument("installers", nargs="+")
+    ns = ap.parse_args(args)
+    proton = find_proton(ns.proton)
+    if proton is None:
+        print(json.dumps({"ok": False, "error": "no Proton executable found"}))
+        return 3
+    try:
+        os.makedirs(ns.prefix, exist_ok=True)
+    except OSError as e:
+        print(json.dumps({"ok": False, "error": "cannot create prefix: %s" % e}))
+        return 3
+    env = dict(os.environ)
+    env["STEAM_COMPAT_DATA_PATH"] = ns.prefix
+    env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = steam_client_path()
+    env["WINEDEBUG"] = "-all"
+    winpath = to_windows_path(ns.installdir)
+    for installer in ns.installers:
+        if not os.path.isfile(installer):
+            print(json.dumps({"ok": False, "error": "installer not found: %s" % installer}))
+            return 3
+        workdir = os.path.dirname(os.path.abspath(installer)) or "."
+        cmd = [proton, "run", installer, "/DIR=" + winpath, "/TASKS=", "/SILENT"]
+        try:
+            proc = subprocess.run(cmd, cwd=workdir, env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            print(json.dumps({"ok": False, "error": "cannot start installer: %s" % e}))
+            return 3
+        if proc.returncode != 0:
+            try:
+                shutil.rmtree(ns.prefix, ignore_errors=False)
+            except OSError:
+                pass
+            print(json.dumps({"ok": False, "error": "installer exit %d" % proc.returncode,
+                              "installer": installer}))
+            return 3
+    # --clean semantics (remove installer leftovers) mirror cleanAfterAdd flag plumbing
+    print(json.dumps({"ok": True, "game": ns.game, "prefix": ns.prefix,
+                      "installdir": ns.installdir, "clean": bool(ns.clean)}))
+    return 0
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd = argv[1]
+    if cmd == "scan" and len(argv) == 3:
+        return scan(argv[2])
+    if cmd == "patch" and len(argv) == 3:
+        return cmd_patch(argv[2])
+    if cmd == "unpatch" and len(argv) == 3:
+        return cmd_unpatch(argv[2])
+    if cmd == "status" and len(argv) == 3:
+        return cmd_status(argv[2])
+    if cmd == "install" and len(argv) >= 3:
+        return cmd_install(argv[2:])
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

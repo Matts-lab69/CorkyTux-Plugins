@@ -1,0 +1,12 @@
+{
+  "name": "DLL Variables Automator",
+  "version": "1.0.0",
+  "entry": "fix-onlinefix-freetp",
+  "description": "Automates DLL variable configuration for Windows games. Detects the AppID, generates WINEDLLOVERRIDES, patches steamfix and configures the necessary paths automatically.",
+  "capabilities": ["scan", "patch", "unpatch", "status", "install"],
+  "protocol": {
+    "stdout": "single JSON document per invocation",
+    "exitCodes": { "0": "ok", "2": "usage/invalid path", "3": "install failed" }
+  },
+  "source": "Matts-lab69/CorkyTux-Plugins"
+}
