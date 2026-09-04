@@ -1,5 +1,5 @@
 {
-  "name": "DLL Variables Automator",
+  "name": "DLL Overrides Automator",
   "version": "1.1.0",
   "entry": "fix-onlinefix-freetp",
   "description": "Automatic DLL-overrides configuration for Windows games. Scans game directories, generates WINEDLLOVERRIDES, and manages DLL patching for multiplayer fix compatibility.",
