@@ -183,11 +183,17 @@ def find_exe_files(directory, extensions=(".exe", ".dll")):
 def scan_game(game_dir):
     """Scan a game directory for dependency hints."""
     if not game_dir or not os.path.isdir(game_dir):
-        err(f"Invalid game directory: {game_dir}")
+        json.dump({"ok": True, "deps": [], "message": "Invalid or missing game directory"}, sys.stdout)
+        return
 
-    exe_files = find_exe_files(game_dir)
+    try:
+        exe_files = find_exe_files(game_dir)
+    except Exception as e:
+        json.dump({"ok": True, "deps": [], "message": f"Scan error: {e}"}, sys.stdout)
+        return
+
     if not exe_files:
-        json.dump({"ok": True, "deps": [], "message": "No executables found"}, sys.stdout)
+        json.dump({"ok": True, "deps": [], "message": "No executables found in game directory"}, sys.stdout)
         return
 
     # Read all DLL names present in the game directory
@@ -198,9 +204,7 @@ def scan_game(game_dir):
     # Check which dependencies are hinted at
     detected = []
     for dep in DEPENDENCIES:
-        # Check if any detect_files are referenced but missing
-        # Heuristic: if the game has .exe files and common deps like vcrun2015
-        # are very likely needed, include them as recommendations
+        # Common deps are always recommended
         if dep["common"]:
             detected.append({
                 "id": dep["id"],
@@ -210,15 +214,13 @@ def scan_game(game_dir):
             continue
 
         # For non-common deps, check if any detect files are present
-        # (indicating the game ships its own copy, which is common)
         has_own = False
         for pattern in dep["detect_files"]:
-            # Simple glob-like matching
             if "*" in pattern:
-                prefix = pattern.split("*")[0].lower()
-                suffix = pattern.split("*")[-1].lower() if "*" in pattern else ""
+                prefix_pat = pattern.split("*")[0].lower()
+                suffix_pat = pattern.split("*")[-1].lower() if "*" in pattern else ""
                 for dll in dll_names:
-                    if dll.startswith(prefix) and dll.endswith(suffix):
+                    if dll.startswith(prefix_pat) and dll.endswith(suffix_pat):
                         has_own = True
                         break
             elif pattern.lower() in dll_names:
@@ -226,20 +228,26 @@ def scan_game(game_dir):
                 break
 
         if not has_own:
-            # Game doesn't ship this dep — recommend installing it
             detected.append({
                 "id": dep["id"],
                 "desc": dep["desc"],
                 "confidence": "suggested",
             })
 
-    json.dump({
-        "ok": True,
-        "deps": detected,
-        "game_dir": game_dir,
-        "total_dlls": len([f for f in exe_files if f.lower().endswith(".dll")]),
-        "total_exes": len([f for f in exe_files if f.lower().endswith(".exe")]),
-    }, sys.stdout)
+    if not detected:
+        json.dump({
+            "ok": True,
+            "deps": [],
+            "message": "No dependencies needed - game appears to be fully configured",
+        }, sys.stdout)
+    else:
+        json.dump({
+            "ok": True,
+            "deps": detected,
+            "game_dir": game_dir,
+            "total_dlls": len([f for f in exe_files if f.lower().endswith(".dll")]),
+            "total_exes": len([f for f in exe_files if f.lower().endswith(".exe")]),
+        }, sys.stdout)
 
 
 def find_winetricks(proton_path=None):
