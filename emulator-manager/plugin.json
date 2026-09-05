@@ -1,0 +1,12 @@
+{
+  "name": "Emulator Manager",
+  "version": "1.0.0",
+  "entry": "emulator-manager",
+  "description": "Gestor de emuladores retro. Descarga e instala emuladores como AppImages.",
+  "capabilities": ["emulators"],
+  "type": "emulator-manager",
+  "protocol": {
+    "stdout": "single JSON document per invocation",
+    "exitCodes": { "0": "ok", "2": "usage error", "3": "install failed" }
+  }
+}

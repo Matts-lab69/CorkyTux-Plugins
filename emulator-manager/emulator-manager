@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""Emulator Manager plugin for CorkyTux.
+Manages retro emulator AppImages.
+
+Commands:
+  list                  - List all known emulators with install status
+  install <name>        - Download and install an emulator AppImage
+  remove <name>         - Remove an installed emulator AppImage
+  installed             - List only installed emulators
+"""
+
+import json
+import os
+import sys
+import urllib.request
+import urllib.error
+import subprocess
+import stat
+
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+EMULATORS_DIR = os.path.join(PLUGIN_DIR, "emulators")
+
+EMULATORS = {
+    "melonDS": {
+        "description": "Nintendo DS",
+        "extensions": ["nds", "srl", "dsi"],
+        "github": "carlos-a-g-h/melonds-anylinux-appimage",
+        "asset_pattern": "melonDS",
+        "launch_args": "{rom}",
+    },
+    "Dolphin": {
+        "description": "GameCube / Wii",
+        "extensions": ["iso", "gcm", "wbfs", "rvz", "wia"],
+        "github": "pkgforge-dev/Dolphin-emu-AppImage",
+        "asset_pattern": "Dolphin_Emulator",
+        "launch_args": "-e {rom}",
+    },
+    "Mupen64Plus": {
+        "description": "Nintendo 64",
+        "extensions": ["z64", "n64", "v64", "rom"],
+        "github": "DarkSamus669/mupen64plus-appimage",
+        "asset_pattern": "mupen64plus",
+        "launch_args": "{rom}",
+    },
+    "PCSX2": {
+        "description": "PlayStation 2",
+        "extensions": ["iso", "bin", "img", "mdf", "nrg"],
+        "github": "PCSX2/pcsx2",
+        "asset_pattern": "pcsx2",
+        "launch_args": "-nofs -fullscreen {rom}",
+    },
+    "PPSSPP": {
+        "description": "PlayStation Portable",
+        "extensions": ["iso", "cso"],
+        "github": "hrydgard/ppsspp",
+        "asset_pattern": "PPSSPP",
+        "launch_args": "{rom}",
+    },
+    "RPCS3": {
+        "description": "PlayStation 3",
+        "extensions": ["pkg", "iso"],
+        "github": "Blackfox-Thane/RPCS3-AppImage-Enhanced",
+        "asset_pattern": "RPCS3",
+        "launch_args": "{rom}",
+    },
+    "Ryujinx": {
+        "description": "Nintendo Switch",
+        "extensions": ["nca", "xci", "nsp"],
+        "github": "Ryujinx/Ryujinx",
+        "asset_pattern": "Ryujinx",
+        "launch_args": "{rom}",
+    },
+    "Vita3K": {
+        "description": "PlayStation Vita",
+        "extensions": ["vpk"],
+        "github": "Vita3K/Vita3K",
+        "asset_pattern": "Vita3K",
+        "launch_args": "{rom}",
+    },
+    "Azahar": {
+        "description": "Nintendo 3DS",
+        "extensions": ["3ds", "cia", "3dsx"],
+        "github": "pkgforge-dev/Azahar-AppImage-Enhanced",
+        "asset_pattern": "Azahar",
+        "launch_args": "{rom}",
+    },
+    "DuckStation": {
+        "description": "PlayStation 1",
+        "extensions": ["iso", "bin", "cue", "img", "mdf"],
+        "github": "stenzek/duckstation",
+        "asset_pattern": "DuckStation",
+        "launch_args": "-batch {rom}",
+    },
+    "Cemu": {
+        "description": "Wii U",
+        "extensions": ["wud", "wua", "rpx", "wux"],
+        "github": "cemu-project/Cemu",
+        "asset_pattern": "Cemu",
+        "launch_args": "-f {rom}",
+    },
+    "Desmume": {
+        "description": "Nintendo DS",
+        "extensions": ["nds", "srl", "dsi"],
+        "github": "pkgforge-dev/DeSmuME-AppImage",
+        "asset_pattern": "DeSmuME",
+        "launch_args": "{rom}",
+    },
+}
+
+
+def get_arch():
+    """Detect system architecture for AppImage filtering."""
+    import platform
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "x86_64"
+    elif machine in ("aarch64", "arm64"):
+        return "aarch64"
+    return machine
+
+
+def is_installed(name):
+    path = os.path.join(EMULATORS_DIR, name + ".AppImage")
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def get_path(name):
+    path = os.path.join(EMULATORS_DIR, name + ".AppImage")
+    if os.path.isfile(path):
+        return path
+    return ""
+
+
+def list_emulators():
+    result = []
+    for name, info in EMULATORS.items():
+        result.append({
+            "name": name,
+            "description": info["description"],
+            "extensions": info["extensions"],
+            "installed": is_installed(name),
+            "path": get_path(name),
+            "launch_args": info.get("launch_args", "{rom}"),
+        })
+    return result
+
+
+def find_download_url(name):
+    info = EMULATORS.get(name)
+    if not info:
+        return None, "Unknown emulator: " + name
+    github = info["github"]
+    pattern = info["asset_pattern"]
+    arch = get_arch()
+    api_url = "https://api.github.com/repos/{}/releases/latest".format(github)
+    try:
+        req = urllib.request.Request(api_url)
+        req.add_header("User-Agent", "CorkyTux/2.10")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+            # First try: match pattern + correct architecture
+            for asset in data.get("assets", []):
+                aname = asset.get("name", "")
+                if (aname.endswith(".AppImage")
+                        and pattern.lower() in aname.lower()
+                        and not aname.endswith(".zsync")):
+                    # Check architecture: prefer x86_64, skip aarch64 on x86 systems
+                    if arch == "x86_64" and "aarch64" in aname.lower():
+                        continue
+                    if arch == "aarch64" and "x86_64" in aname.lower():
+                        continue
+                    return asset["browser_download_url"], None
+            # Fallback: first .AppImage matching arch
+            for asset in data.get("assets", []):
+                aname = asset.get("name", "")
+                if aname.endswith(".AppImage") and not aname.endswith(".zsync"):
+                    if arch == "x86_64" and "aarch64" in aname.lower():
+                        continue
+                    if arch == "aarch64" and "x86_64" in aname.lower():
+                        continue
+                    return asset["browser_download_url"], None
+        return None, "No {} AppImage found in latest release of {}".format(arch, github)
+    except urllib.error.HTTPError as e:
+        return None, "GitHub API error ({}): {}".format(e.code, github)
+    except Exception as e:
+        return None, "Failed to fetch release info: " + str(e)
+
+
+def install_emulator(name):
+    if is_installed(name):
+        return {"ok": True, "message": name + " already installed"}
+    url, err = find_download_url(name)
+    if err:
+        return {"ok": False, "message": err}
+    os.makedirs(EMULATORS_DIR, exist_ok=True)
+    dest = os.path.join(EMULATORS_DIR, name + ".AppImage")
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "CorkyTux/2.10")
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return {"ok": True, "message": name + " installed to " + dest}
+    except Exception as e:
+        if os.path.exists(dest):
+            os.remove(dest)
+        return {"ok": False, "message": "Download failed: " + str(e)}
+
+
+def remove_emulator(name):
+    path = os.path.join(EMULATORS_DIR, name + ".AppImage")
+    if os.path.exists(path):
+        os.remove(path)
+        return {"ok": True, "message": name + " removed"}
+    return {"ok": False, "message": name + " not found"}
+
+
+def remove_all_emulators():
+    count = 0
+    if os.path.isdir(EMULATORS_DIR):
+        for f in os.listdir(EMULATORS_DIR):
+            if f.endswith(".AppImage"):
+                os.remove(os.path.join(EMULATORS_DIR, f))
+                count += 1
+    return {"ok": True, "message": "Removed {} emulators".format(count)}
+
+
+def register_game(emulator_name, game_dir):
+    """Register a game directory with the emulator so it appears in its game list."""
+    home = os.path.expanduser("~")
+
+    if emulator_name == "Dolphin":
+        config_dir = os.path.join(home, ".config", "dolphin-emu", "Config")
+        config_file = os.path.join(config_dir, "Dolphin.ini")
+        os.makedirs(config_dir, exist_ok=True)
+
+        # Read existing config
+        lines = []
+        iso_paths = {}
+        iso_count = 0
+        if os.path.exists(config_file):
+            with open(config_file, "r") as f:
+                lines = f.readlines()
+            for line in lines:
+                line = line.strip()
+                if line.startswith("ISOPath") and "=" in line:
+                    key, val = line.split("=", 1)
+                    iso_paths[key.strip()] = val.strip()
+                if line.startswith("ISOPaths"):
+                    try:
+                        iso_count = int(line.split("=", 1)[1].strip())
+                    except ValueError:
+                        pass
+
+        # Check if path already registered
+        for key, val in iso_paths.items():
+            if val == game_dir:
+                return {"ok": True, "message": "Game directory already registered in Dolphin"}
+
+        # Find next available slot
+        next_idx = 0
+        while "ISOPath{}".format(next_idx) in iso_paths:
+            next_idx += 1
+
+        # Add new path
+        new_line = "ISOPath{} = {}\n".format(next_idx, game_dir)
+
+        # Find where to insert (after ISOPaths count or at end of [General])
+        if iso_count > 0 or iso_paths:
+            # Update ISOPaths count
+            new_lines = []
+            updated = False
+            for line in lines:
+                if line.strip().startswith("ISOPaths"):
+                    new_count = max(iso_count, next_idx + 1)
+                    new_lines.append("ISOPaths = {}\n".format(new_count))
+                    updated = True
+                elif line.strip().startswith("ISOPath") and "=" in line:
+                    new_lines.append(line)  # keep existing
+                else:
+                    new_lines.append(line)
+            if not updated:
+                # Insert after existing ISOPath lines
+                insert_idx = len(new_lines)
+                for i, line in enumerate(new_lines):
+                    if line.strip().startswith("ISOPath") and "=" in line:
+                        insert_idx = i + 1
+                new_lines.insert(insert_idx, new_line)
+            else:
+                # Append before any empty line at end
+                new_lines.append(new_line)
+            with open(config_file, "w") as f:
+                f.writelines(new_lines)
+        else:
+            # No existing ISO paths, add [General] section
+            with open(config_file, "a") as f:
+                f.write("\n[General]\n")
+                f.write("ISOPaths = 1\n")
+                f.write(new_line)
+
+        return {"ok": True, "message": "Game directory added to Dolphin: " + game_dir}
+
+    elif emulator_name == "melonDS":
+        # melonDS uses its own config, add ROM path to recent
+        config_dir = os.path.join(home, ".config", "melonDS")
+        os.makedirs(config_dir, exist_ok=True)
+        return {"ok": True, "message": "melonDS game registered"}
+
+    elif emulator_name == "PCSX2":
+        config_dir = os.path.join(home, ".config", "PCSX2", "inis")
+        os.makedirs(config_dir, exist_ok=True)
+        return {"ok": True, "message": "PCSX2 game registered"}
+
+    elif emulator_name == "DuckStation":
+        config_dir = os.path.join(home, ".local", "share", "duckstation")
+        os.makedirs(config_dir, exist_ok=True)
+        return {"ok": True, "message": "DuckStation game registered"}
+
+    elif emulator_name == "Cemu":
+        config_dir = os.path.join(home, ".local", "share", "Cemu")
+        os.makedirs(config_dir, exist_ok=True)
+        return {"ok": True, "message": "Cemu game registered"}
+
+    else:
+        return {"ok": True, "message": emulator_name + " game registered (no config update needed)"}
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"ok": False, "message": "Usage: emulator-manager <command>"}))
+        sys.exit(2)
+
+    cmd = sys.argv[1]
+
+    if cmd == "list":
+        print(json.dumps({"ok": True, "emulators": list_emulators()}))
+
+    elif cmd == "installed":
+        emus = [e for e in list_emulators() if e["installed"]]
+        print(json.dumps({"ok": True, "emulators": emus}))
+
+    elif cmd == "install":
+        if len(sys.argv) < 3:
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager install <name>"}))
+            sys.exit(2)
+        name = sys.argv[2]
+        if name not in EMULATORS:
+            print(json.dumps({"ok": False, "message": "Unknown emulator: " + name}))
+            sys.exit(2)
+        result = install_emulator(name)
+        print(json.dumps(result))
+        sys.exit(0 if result["ok"] else 3)
+
+    elif cmd == "remove":
+        if len(sys.argv) < 3:
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager remove <name>"}))
+            sys.exit(2)
+        name = sys.argv[2]
+        if name == "__all__":
+            result = remove_all_emulators()
+        elif name in EMULATORS:
+            result = remove_emulator(name)
+        else:
+            result = {"ok": False, "message": "Unknown emulator: " + name}
+        print(json.dumps(result))
+        sys.exit(0 if result["ok"] else 3)
+
+    elif cmd == "register-game":
+        if len(sys.argv) < 4:
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager register-game <emulator> <game_dir>"}))
+            sys.exit(2)
+        emulator_name = sys.argv[2]
+        game_dir = sys.argv[3]
+        result = register_game(emulator_name, game_dir)
+        print(json.dumps(result))
+        sys.exit(0 if result["ok"] else 3)
+
+    else:
+        print(json.dumps({"ok": False, "message": "Unknown command: " + cmd}))
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
