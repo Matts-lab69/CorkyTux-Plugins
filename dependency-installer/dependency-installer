@@ -180,7 +180,21 @@ def find_exe_files(directory, extensions=(".exe", ".dll")):
     return results
 
 
-def scan_game(game_dir):
+def check_dep_installed(prefix, dep):
+    """Check if a dependency is already installed in the prefix."""
+    if not prefix:
+        return False
+    sys32 = os.path.join(prefix, "drive_c", "windows", "system32")
+    syswow64 = os.path.join(prefix, "drive_c", "windows", "syswow64")
+    search_dirs = [d for d in [sys32, syswow64] if os.path.isdir(d)]
+    for f in dep.get("detect_files", []):
+        for d in search_dirs:
+            if os.path.isfile(os.path.join(d, f)):
+                return True
+    return False
+
+
+def scan_game(game_dir, prefix=None):
     """Scan a game directory for dependency hints."""
     if not game_dir or not os.path.isdir(game_dir):
         json.dump({"ok": True, "deps": [], "message": "Invalid or missing game directory"}, sys.stdout)
@@ -204,6 +218,16 @@ def scan_game(game_dir):
     # Check which dependencies are hinted at
     detected = []
     for dep in DEPENDENCIES:
+        # Check if already installed in prefix
+        if prefix and check_dep_installed(prefix, dep):
+            detected.append({
+                "id": dep["id"],
+                "desc": dep["desc"],
+                "confidence": "installed",
+                "status": "installed",
+            })
+            continue
+
         # Common deps are always recommended
         if dep["common"]:
             detected.append({
@@ -234,11 +258,18 @@ def scan_game(game_dir):
                 "confidence": "suggested",
             })
 
+    needs_install = [d for d in detected if d.get("status") != "installed"]
     if not detected:
         json.dump({
             "ok": True,
             "deps": [],
             "message": "No dependencies needed - game appears to be fully configured",
+        }, sys.stdout)
+    elif not needs_install:
+        json.dump({
+            "ok": True,
+            "deps": detected,
+            "message": f"All {len(detected)} dependencies already installed",
         }, sys.stdout)
     else:
         json.dump({
@@ -395,9 +426,22 @@ def main():
     cmd = sys.argv[1]
 
     if cmd == "scan":
-        if len(sys.argv) < 3:
-            err("Usage: dependency-installer scan <gamedir>")
-        scan_game(sys.argv[2])
+        # Parse: scan <gamedir> [--prefix P]
+        prefix = None
+        game_dir = None
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--prefix" and i + 1 < len(sys.argv):
+                prefix = sys.argv[i + 1]
+                i += 2
+            elif game_dir is None:
+                game_dir = sys.argv[i]
+                i += 1
+            else:
+                i += 1
+        if not game_dir:
+            err("Usage: dependency-installer scan <gamedir> [--prefix P]")
+        scan_game(game_dir, prefix)
 
     elif cmd == "install":
         # Parse args: --prefix P [--proton PATH] dep1 [dep2 ...]
