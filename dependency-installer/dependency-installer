@@ -168,14 +168,17 @@ DEPENDENCIES = [
 def extract_dll_names(file_path):
     """Extract DLL names from a binary file using strings."""
     try:
+        # Skip files larger than 100MB (strings takes too long)
+        if os.path.getsize(file_path) > 100 * 1024 * 1024:
+            return set()
         result = subprocess.run(
             ['strings', '-n', '4', file_path],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=10
         )
         dlls = set()
         for line in result.stdout.splitlines():
             line = line.strip().lower()
-            # Match Windows DLL names: word.dll, word.dll (with numbers)
+            # Match Windows DLL names: word.dll, word123.dll
             if re.match(r'^[a-z0-9_\-]+\.dll$', line):
                 dlls.add(line)
         return dlls
@@ -229,9 +232,27 @@ def scan_game(game_dir, prefix=None, proton_path=None):
 
         # If game ships with Mono, skip .NET detection (Mono handles it)
         if dep["id"] in ("dotnet48", "dotnet35sp1"):
-            has_mono = any(os.path.basename(f).lower() in ('mono-2.0-bdwgc.dll', 'mono.dll')
-                          for f in game_files)
-            if has_mono:
+            has_mono = False
+            has_dotnet = False
+            for f in game_files:
+                bn = os.path.basename(f).lower()
+                if bn in ('mono-2.0-bdwgc.dll', 'mono.dll', 'monoposixhelper.dll'):
+                    has_mono = True
+                # .NET games have managed assemblies
+                if bn.startswith(('system.', 'microsoft.', 'mscorlib.')) or \
+                   bn.startswith(('System.', 'Microsoft.', 'mscorlib.')):
+                    has_dotnet = True
+            # Also check deeper for MonoBleedingEdge
+            if not has_mono:
+                for root, dirs, files in os.walk(game_dir):
+                    for f in files:
+                        if f.lower() in ('mono-2.0-bdwgc.dll', 'mono.dll'):
+                            has_mono = True
+                            break
+                    if has_mono:
+                        break
+            # Skip if has Mono OR if game is not .NET (no managed assemblies)
+            if has_mono or not has_dotnet:
                 continue
 
         # Check if game ACTUALLY imports the required DLLs
@@ -239,7 +260,7 @@ def scan_game(game_dir, prefix=None, proton_path=None):
         evidence = []
 
         for dll in dep.get("must_import", []):
-            if dll in all_dlls:
+            if dll in all_dlls and not is_wine_builtin(dll):
                 # Check if game ships with this DLL (doesn't need winetricks)
                 game_has_dll = False
                 for f in game_files:
@@ -252,7 +273,7 @@ def scan_game(game_dir, prefix=None, proton_path=None):
 
         for pattern in dep.get("must_import_pattern", []):
             for dll in all_dlls:
-                if re.match(pattern, dll):
+                if re.match(pattern, dll) and not is_wine_builtin(dll):
                     # Check if game ships with this DLL
                     game_has_dll = False
                     for f in game_files:
