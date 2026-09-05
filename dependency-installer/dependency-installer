@@ -58,6 +58,16 @@ WINE_PROVIDES = {
     'xaudio2_8.dll', 'xaudio2_9.dll',
     # XACT (Wine provides)
     'xactengine*.dll', 'x3daudio*.dll', 'xapo*.dll',
+    # Additional Wine/Proton DLLs
+    'mswsock.dll', 'wsdapi.dll', 'wsclient.dll',
+    'usp10.dll', 'gdiplus.dll', 'windowscodecs.dll',
+    'mlang.dll', 'mshtml.dll', 'msxml*.dll',
+    'winex11.drv', 'wined3d.dll', 'winevulkan.dll',
+    'd3d11.dll', 'd3d12.dll', 'dxgi.dll',
+    'vulkan-1.dll', 'winevulkan.dll',
+    # API set DLLs (Windows API redirection)
+    'api-ms-win-core-*.dll', 'api-ms-win-downlevel-*.dll',
+    'api-ms-win-*.dll',
 }
 
 def is_wine_builtin(dll_name):
@@ -66,7 +76,9 @@ def is_wine_builtin(dll_name):
     if dll in WINE_PROVIDES:
         return True
     # Check patterns
-    for pattern in ['xactengine*.dll', 'x3daudio*.dll', 'xapo*.dll']:
+    for pattern in ['xactengine*.dll', 'x3daudio*.dll', 'xapo*.dll',
+                    'api-ms-win-core-*.dll', 'api-ms-win-downlevel-*.dll',
+                    'api-ms-win-*.dll', 'msxml*.dll']:
         prefix = pattern.split('*')[0]
         suffix = pattern.split('*')[-1] if '*' in pattern else ''
         if dll.startswith(prefix) and dll.endswith(suffix):
@@ -166,21 +178,40 @@ DEPENDENCIES = [
 # ---------------------------------------------------------------------------
 
 def extract_dll_names(file_path):
-    """Extract DLL names from a binary file using strings."""
+    """Extract DLL names from a binary file using strings or fallback."""
     try:
         # Skip files larger than 100MB (strings takes too long)
         if os.path.getsize(file_path) > 100 * 1024 * 1024:
             return set()
+
+        # Try to find strings binary
+        strings_bin = shutil.which('strings')
+        if not strings_bin:
+            # Fallback: read file and extract with regex
+            with open(file_path, 'rb') as f:
+                data = f.read(50 * 1024 * 1024)  # Read first 50MB
+            dlls = set()
+            for match in re.finditer(rb'[\x20-\x7e]{4,60}', data):
+                try:
+                    s = match.group(0).decode('ascii').strip().lower()
+                    if re.match(r'^[a-z0-9_\-\.]+\.dll$', s):
+                        dlls.add(s)
+                except:
+                    pass
+            return dlls
+
         result = subprocess.run(
-            ['strings', '-n', '4', file_path],
+            [strings_bin, '-n', '4', file_path],
             capture_output=True, text=True, timeout=10
         )
         dlls = set()
         for line in result.stdout.splitlines():
             line = line.strip().lower()
-            # Match Windows DLL names: word.dll, word123.dll
-            if re.match(r'^[a-z0-9_\-]+\.dll$', line):
-                dlls.add(line)
+            # Match Windows DLL names: word.dll, api-ms-win-*.dll, etc.
+            if re.match(r'^[a-z0-9_\-\.]+\.dll$', line):
+                # Filter out obvious non-DLL strings
+                if len(line) < 80 and not line.startswith(('.', '..', '...')):
+                    dlls.add(line)
         return dlls
     except Exception:
         return set()
