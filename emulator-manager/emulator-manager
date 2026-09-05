@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Emulator Manager plugin for CorkyTux.
-Manages retro emulator AppImages.
+Manages retro emulator AppImages and links to existing installs.
 
 Commands:
   list                  - List all known emulators with install status
   install <name>        - Download and install an emulator AppImage
   remove <name>         - Remove an installed emulator AppImage
   installed             - List only installed emulators
+  link <name> <path>    - Link an existing emulator executable
+  unlink <name>         - Remove a linked emulator (does not delete the file)
+  linked                - List only linked emulators
 """
 
 import json
@@ -19,6 +22,7 @@ import stat
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 EMULATORS_DIR = os.path.join(PLUGIN_DIR, "emulators")
+LINKED_FILE = os.path.join(PLUGIN_DIR, "linked.json")
 
 EMULATORS = {
     "melonDS": {
@@ -108,6 +112,23 @@ EMULATORS = {
 }
 
 
+def load_linked():
+    """Load linked emulators from JSON file."""
+    if os.path.exists(LINKED_FILE):
+        try:
+            with open(LINKED_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_linked(data):
+    """Save linked emulators to JSON file."""
+    with open(LINKED_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
 def get_arch():
     """Detect system architecture for AppImage filtering."""
     import platform
@@ -120,32 +141,118 @@ def get_arch():
 
 
 def is_installed(name):
+    """Check if emulator is installed (AppImage or linked)."""
+    # Check linked first
+    linked = load_linked()
+    if name in linked:
+        path = linked[name].get("path", "")
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    # Check AppImage
     path = os.path.join(EMULATORS_DIR, name + ".AppImage")
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
 def get_path(name):
+    """Get emulator path (linked or AppImage)."""
+    # Check linked first
+    linked = load_linked()
+    if name in linked:
+        path = linked[name].get("path", "")
+        if os.path.isfile(path):
+            return path
+    # Check AppImage
     path = os.path.join(EMULATORS_DIR, name + ".AppImage")
     if os.path.isfile(path):
         return path
     return ""
 
 
+def get_launch_args(name):
+    """Get launch args for an emulator (linked or AppImage)."""
+    # Check linked
+    linked = load_linked()
+    if name in linked:
+        return linked[name].get("launch_args", "{rom}")
+    # Check built-in
+    info = EMULATORS.get(name, {})
+    return info.get("launch_args", "{rom}")
+
+
 def list_emulators():
+    """List all emulators with status (AppImage or linked)."""
+    linked = load_linked()
     result = []
     for name, info in EMULATORS.items():
+        is_link = name in linked
         result.append({
             "name": name,
             "description": info["description"],
             "extensions": info["extensions"],
             "installed": is_installed(name),
             "path": get_path(name),
-            "launch_args": info.get("launch_args", "{rom}"),
+            "launch_args": get_launch_args(name),
+            "linked": is_link,
         })
+    # Add linked emulators not in EMULATORS list (custom/unknown)
+    for name, data in linked.items():
+        if name not in EMULATORS:
+            result.append({
+                "name": name,
+                "description": data.get("description", "Custom emulator"),
+                "extensions": data.get("extensions", []),
+                "installed": True,
+                "path": data.get("path", ""),
+                "launch_args": data.get("launch_args", "{rom}"),
+                "linked": True,
+            })
     return result
 
 
+def link_emulator(name, path, launch_args=None, description=None, extensions=None):
+    """Link an existing emulator executable."""
+    if not os.path.isfile(path):
+        return {"ok": False, "message": "File not found: " + path}
+    if not os.access(path, os.X_OK):
+        return {"ok": False, "message": "File not executable: " + path}
+    linked = load_linked()
+    info = {
+        "path": os.path.abspath(path),
+    }
+    if launch_args:
+        info["launch_args"] = launch_args
+    elif name in EMULATORS:
+        info["launch_args"] = EMULATORS[name].get("launch_args", "{rom}")
+    else:
+        info["launch_args"] = "{rom}"
+    if description:
+        info["description"] = description
+    elif name in EMULATORS:
+        info["description"] = EMULATORS[name].get("description", "")
+    else:
+        info["description"] = "Custom emulator"
+    if extensions:
+        info["extensions"] = extensions
+    elif name in EMULATORS:
+        info["extensions"] = EMULATORS[name].get("extensions", [])
+    else:
+        info["extensions"] = []
+    linked[name] = info
+    save_linked(linked)
+    return {"ok": True, "message": name + " linked to " + path}
+
+
+def unlink_emulator(name):
+    """Remove a linked emulator (does not delete the file)."""
+    linked = load_linked()
+    if name in linked:
+        del linked[name]
+        save_linked(linked)
+        return {"ok": True, "message": name + " unlinked"}
+    return {"ok": False, "message": name + " not linked"}
+
+
 def find_download_url(name):
+    """Find the latest AppImage download URL from GitHub."""
     info = EMULATORS.get(name)
     if not info:
         return None, "Unknown emulator: " + name
@@ -158,19 +265,16 @@ def find_download_url(name):
         req.add_header("User-Agent", "CorkyTux/2.10")
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
-            # First try: match pattern + correct architecture
             for asset in data.get("assets", []):
                 aname = asset.get("name", "")
                 if (aname.endswith(".AppImage")
                         and pattern.lower() in aname.lower()
                         and not aname.endswith(".zsync")):
-                    # Check architecture: prefer x86_64, skip aarch64 on x86 systems
                     if arch == "x86_64" and "aarch64" in aname.lower():
                         continue
                     if arch == "aarch64" and "x86_64" in aname.lower():
                         continue
                     return asset["browser_download_url"], None
-            # Fallback: first .AppImage matching arch
             for asset in data.get("assets", []):
                 aname = asset.get("name", "")
                 if aname.endswith(".AppImage") and not aname.endswith(".zsync"):
@@ -187,6 +291,7 @@ def find_download_url(name):
 
 
 def install_emulator(name):
+    """Download and install an emulator AppImage."""
     if is_installed(name):
         return {"ok": True, "message": name + " already installed"}
     url, err = find_download_url(name)
@@ -213,6 +318,7 @@ def install_emulator(name):
 
 
 def remove_emulator(name):
+    """Remove an AppImage (does not affect linked emulators)."""
     path = os.path.join(EMULATORS_DIR, name + ".AppImage")
     if os.path.exists(path):
         os.remove(path)
@@ -221,6 +327,7 @@ def remove_emulator(name):
 
 
 def remove_all_emulators():
+    """Remove all AppImage emulators."""
     count = 0
     if os.path.isdir(EMULATORS_DIR):
         for f in os.listdir(EMULATORS_DIR):
@@ -239,7 +346,6 @@ def register_game(emulator_name, game_dir):
         config_file = os.path.join(config_dir, "Dolphin.ini")
         os.makedirs(config_dir, exist_ok=True)
 
-        # Read existing config
         lines = []
         iso_paths = {}
         iso_count = 0
@@ -257,22 +363,17 @@ def register_game(emulator_name, game_dir):
                     except ValueError:
                         pass
 
-        # Check if path already registered
         for key, val in iso_paths.items():
             if val == game_dir:
                 return {"ok": True, "message": "Game directory already registered in Dolphin"}
 
-        # Find next available slot
         next_idx = 0
         while "ISOPath{}".format(next_idx) in iso_paths:
             next_idx += 1
 
-        # Add new path
         new_line = "ISOPath{} = {}\n".format(next_idx, game_dir)
 
-        # Find where to insert (after ISOPaths count or at end of [General])
         if iso_count > 0 or iso_paths:
-            # Update ISOPaths count
             new_lines = []
             updated = False
             for line in lines:
@@ -281,23 +382,20 @@ def register_game(emulator_name, game_dir):
                     new_lines.append("ISOPaths = {}\n".format(new_count))
                     updated = True
                 elif line.strip().startswith("ISOPath") and "=" in line:
-                    new_lines.append(line)  # keep existing
+                    new_lines.append(line)
                 else:
                     new_lines.append(line)
             if not updated:
-                # Insert after existing ISOPath lines
                 insert_idx = len(new_lines)
                 for i, line in enumerate(new_lines):
                     if line.strip().startswith("ISOPath") and "=" in line:
                         insert_idx = i + 1
                 new_lines.insert(insert_idx, new_line)
             else:
-                # Append before any empty line at end
                 new_lines.append(new_line)
             with open(config_file, "w") as f:
                 f.writelines(new_lines)
         else:
-            # No existing ISO paths, add [General] section
             with open(config_file, "a") as f:
                 f.write("\n[General]\n")
                 f.write("ISOPaths = 1\n")
@@ -306,7 +404,6 @@ def register_game(emulator_name, game_dir):
         return {"ok": True, "message": "Game directory added to Dolphin: " + game_dir}
 
     elif emulator_name == "melonDS":
-        # melonDS uses its own config, add ROM path to recent
         config_dir = os.path.join(home, ".config", "melonDS")
         os.makedirs(config_dir, exist_ok=True)
         return {"ok": True, "message": "melonDS game registered"}
@@ -344,6 +441,10 @@ def main():
         emus = [e for e in list_emulators() if e["installed"]]
         print(json.dumps({"ok": True, "emulators": emus}))
 
+    elif cmd == "linked":
+        emus = [e for e in list_emulators() if e.get("linked")]
+        print(json.dumps({"ok": True, "emulators": emus}))
+
     elif cmd == "install":
         if len(sys.argv) < 3:
             print(json.dumps({"ok": False, "message": "Usage: emulator-manager install <name>"}))
@@ -367,6 +468,26 @@ def main():
             result = remove_emulator(name)
         else:
             result = {"ok": False, "message": "Unknown emulator: " + name}
+        print(json.dumps(result))
+        sys.exit(0 if result["ok"] else 3)
+
+    elif cmd == "link":
+        if len(sys.argv) < 4:
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager link <name> <path>"}))
+            sys.exit(2)
+        name = sys.argv[2]
+        path = sys.argv[3]
+        launch_args = sys.argv[4] if len(sys.argv) > 4 else None
+        result = link_emulator(name, path, launch_args)
+        print(json.dumps(result))
+        sys.exit(0 if result["ok"] else 3)
+
+    elif cmd == "unlink":
+        if len(sys.argv) < 3:
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager unlink <name>"}))
+            sys.exit(2)
+        name = sys.argv[2]
+        result = unlink_emulator(name)
         print(json.dumps(result))
         sys.exit(0 if result["ok"] else 3)
 
