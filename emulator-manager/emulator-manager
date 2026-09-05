@@ -34,7 +34,14 @@ EMULATORS = {
         "github": "carlos-a-g-h/melonds-anylinux-appimage",
         "asset_pattern": "melonDS",
         "launch_args": "{rom}",
-        "settings": [],
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "show_osd", "type": "bool", "default": True,
+             "desc": "Mostrar OSD (overlay de pantalla)"},
+            {"id": "jit_enable", "type": "bool", "default": True,
+             "desc": "Habilitar JIT (mayor velocidad)"},
+        ],
     },
     "Dolphin": {
         "description": "GameCube / Wii",
@@ -44,9 +51,9 @@ EMULATORS = {
         "launch_args": "-e {rom}",
         "settings": [
             {"id": "batch", "type": "bool", "default": False,
-             "desc": "Lote (ejecutar sin abrir GUI de Dolphin)"},
+             "desc": "Lote (ejecutar sin abrir la interfaz)"},
             {"id": "user_dir", "type": "path", "default": "",
-             "desc": "Directorio de usuario personalizado"},
+             "desc": "Carpeta de guardados y configuración"},
         ],
     },
     "Mupen64Plus": {
