@@ -2,14 +2,17 @@
 """Emulator Manager plugin for CorkyTux.
 Manages retro emulator AppImages and links to existing installs.
 
+All commands require the 'corky-' prefix to avoid conflicts with system tools.
+Run from the plugin directory or with full path.
+
 Commands:
-  list                  - List all known emulators with install status
-  install <name>        - Download and install an emulator AppImage
-  remove <name>         - Remove an installed emulator AppImage
-  installed             - List only installed emulators
-  link <name> <path>    - Link an existing emulator executable
-  unlink <name>         - Remove a linked emulator (does not delete the file)
-  linked                - List only linked emulators
+  corky-list                  - List all known emulators with install status
+  corky-install <name>        - Download and install an emulator AppImage
+  corky-remove <name>         - Remove an installed emulator AppImage
+  corky-installed             - List only installed emulators
+  corky-link <name> <path>    - Link an existing emulator executable
+  corky-unlink <name>         - Remove a linked emulator (does not delete the file)
+  corky-linked                - List only linked emulators
 """
 
 import json
@@ -429,10 +432,14 @@ def register_game(emulator_name, game_dir):
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"ok": False, "message": "Usage: emulator-manager <command>"}))
+        print(json.dumps({"ok": False, "message": "Usage: emulator-manager <corky-command>"}))
         sys.exit(2)
 
     cmd = sys.argv[1]
+
+    # Strip corky- prefix if present
+    if cmd.startswith("corky-"):
+        cmd = cmd[6:]
 
     if cmd == "list":
         print(json.dumps({"ok": True, "emulators": list_emulators()}))
@@ -447,7 +454,7 @@ def main():
 
     elif cmd == "install":
         if len(sys.argv) < 3:
-            print(json.dumps({"ok": False, "message": "Usage: emulator-manager install <name>"}))
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager corky-install <name>"}))
             sys.exit(2)
         name = sys.argv[2]
         if name not in EMULATORS:
@@ -459,7 +466,7 @@ def main():
 
     elif cmd == "remove":
         if len(sys.argv) < 3:
-            print(json.dumps({"ok": False, "message": "Usage: emulator-manager remove <name>"}))
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager corky-remove <name>"}))
             sys.exit(2)
         name = sys.argv[2]
         if name == "__all__":
@@ -473,7 +480,7 @@ def main():
 
     elif cmd == "link":
         if len(sys.argv) < 4:
-            print(json.dumps({"ok": False, "message": "Usage: emulator-manager link <name> <path>"}))
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager corky-link <name> <path>"}))
             sys.exit(2)
         name = sys.argv[2]
         path = sys.argv[3]
@@ -484,7 +491,7 @@ def main():
 
     elif cmd == "unlink":
         if len(sys.argv) < 3:
-            print(json.dumps({"ok": False, "message": "Usage: emulator-manager unlink <name>"}))
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager corky-unlink <name>"}))
             sys.exit(2)
         name = sys.argv[2]
         result = unlink_emulator(name)
@@ -493,7 +500,7 @@ def main():
 
     elif cmd == "register-game":
         if len(sys.argv) < 4:
-            print(json.dumps({"ok": False, "message": "Usage: emulator-manager register-game <emulator> <game_dir>"}))
+            print(json.dumps({"ok": False, "message": "Usage: emulator-manager corky-register-game <emulator> <game_dir>"}))
             sys.exit(2)
         emulator_name = sys.argv[2]
         game_dir = sys.argv[3]
