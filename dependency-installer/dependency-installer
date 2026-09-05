@@ -90,11 +90,11 @@ def is_wine_builtin(dll_name):
 # ---------------------------------------------------------------------------
 
 DEPENDENCIES = [
+    # Visual C++ Runtimes
     {
         "id": "vcrun2015",
         "verb": "vcrun2015",
         "desc": "Visual C++ 2015-2022 Redistributable",
-        # Game must import these DLLs to NEED this
         "must_import": ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
                         'concrt140.dll', 'vcomp140.dll', 'vcamp140.dll'],
     },
@@ -125,11 +125,149 @@ DEPENDENCIES = [
                         'msvcr80.dll', 'msvcp80.dll'],
     },
     {
+        "id": "vcrun2005",
+        "verb": "vcrun2005",
+        "desc": "Visual C++ 2005 Redistributable",
+        "must_import": ['msvcp80.dll', 'msvcr80.dll', 'vcomp80.dll'],
+    },
+
+    # DirectX 9
+    {
         "id": "d3dx9",
         "verb": "d3dx9",
-        "desc": "DirectX 9 helper library",
-        # Game must import d3dx9_XX.dll specifically (not d3d9.dll!)
+        "desc": "DirectX 9 helper library (latest)",
         "must_import": [f'd3dx9_{i}.dll' for i in range(24, 44)],
+    },
+    {
+        "id": "d3dx9_24",
+        "verb": "d3dx9_24",
+        "desc": "DirectX 9.0c (2004)",
+        "must_import": ['d3dx9_24.dll'],
+    },
+    {
+        "id": "d3dx9_25",
+        "verb": "d3dx9_25",
+        "desc": "DirectX 9.0c (2004)",
+        "must_import": ['d3dx9_25.dll'],
+    },
+    {
+        "id": "d3dx9_26",
+        "verb": "d3dx9_26",
+        "desc": "DirectX 9.0c (2004)",
+        "must_import": ['d3dx9_26.dll'],
+    },
+    {
+        "id": "d3dx9_27",
+        "verb": "d3dx9_27",
+        "desc": "DirectX 9.0c (2005)",
+        "must_import": ['d3dx9_27.dll'],
+    },
+    {
+        "id": "d3dx9_28",
+        "verb": "d3dx9_28",
+        "desc": "DirectX 9.0c (2005)",
+        "must_import": ['d3dx9_28.dll'],
+    },
+    {
+        "id": "d3dx9_29",
+        "verb": "d3dx9_29",
+        "desc": "DirectX 9.0c (2005)",
+        "must_import": ['d3dx9_29.dll'],
+    },
+    {
+        "id": "d3dx9_30",
+        "verb": "d3dx9_30",
+        "desc": "DirectX 9.0c (2006)",
+        "must_import": ['d3dx9_30.dll'],
+    },
+    {
+        "id": "d3dx9_31",
+        "verb": "d3dx9_31",
+        "desc": "DirectX 9.0c (2006)",
+        "must_import": ['d3dx9_31.dll'],
+    },
+    {
+        "id": "d3dx9_32",
+        "verb": "d3dx9_32",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_32.dll'],
+    },
+    {
+        "id": "d3dx9_33",
+        "verb": "d3dx9_33",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_33.dll'],
+    },
+    {
+        "id": "d3dx9_34",
+        "verb": "d3dx9_34",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_34.dll'],
+    },
+    {
+        "id": "d3dx9_35",
+        "verb": "d3dx9_35",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_35.dll'],
+    },
+    {
+        "id": "d3dx9_36",
+        "verb": "d3dx9_36",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_36.dll'],
+    },
+    {
+        "id": "d3dx9_37",
+        "verb": "d3dx9_37",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_37.dll'],
+    },
+    {
+        "id": "d3dx9_38",
+        "verb": "d3dx9_38",
+        "desc": "DirectX 9.0c (2007)",
+        "must_import": ['d3dx9_38.dll'],
+    },
+    {
+        "id": "d3dx9_39",
+        "verb": "d3dx9_39",
+        "desc": "DirectX 9.0c (2008)",
+        "must_import": ['d3dx9_39.dll'],
+    },
+    {
+        "id": "d3dx9_40",
+        "verb": "d3dx9_40",
+        "desc": "DirectX 9.0c (2008)",
+        "must_import": ['d3dx9_40.dll'],
+    },
+    {
+        "id": "d3dx9_41",
+        "verb": "d3dx9_41",
+        "desc": "DirectX 9.0c (2008)",
+        "must_import": ['d3dx9_41.dll'],
+    },
+    {
+        "id": "d3dx9_42",
+        "verb": "d3dx9_42",
+        "desc": "DirectX 9.0c (2009)",
+        "must_import": ['d3dx9_42.dll'],
+    },
+    {
+        "id": "d3dx9_43",
+        "verb": "d3dx9_43",
+        "desc": "DirectX 9.0c (2009)",
+        "must_import": ['d3dx9_43.dll'],
+    },
+
+    # DirectX 10/11
+    {
+        "id": "d3dx10",
+        "verb": "d3dx10",
+        "desc": "DirectX 10 helper library",
+        "must_import": ['d3dx10_33.dll', 'd3dx10_34.dll', 'd3dx10_35.dll',
+                        'd3dx10_36.dll', 'd3dx10_37.dll', 'd3dx10_38.dll',
+                        'd3dx10_39.dll', 'd3dx10_40.dll', 'd3dx10_41.dll',
+                        'd3dx10_42.dll', 'd3dx10_43.dll'],
     },
     {
         "id": "d3dx11_43",
@@ -138,17 +276,42 @@ DEPENDENCIES = [
         "must_import": ['d3dx11_43.dll'],
     },
     {
+        "id": "d3dcompiler_43",
+        "verb": "d3dcompiler_43",
+        "desc": "Direct3D Shader Compiler 43",
+        "must_import": ['d3dcompiler_43.dll'],
+    },
+    {
+        "id": "d3dcompiler_46",
+        "verb": "d3dcompiler_46",
+        "desc": "Direct3D Shader Compiler 46",
+        "must_import": ['d3dcompiler_46.dll'],
+    },
+    {
         "id": "d3dcompiler_47",
         "verb": "d3dcompiler_47",
         "desc": "Direct3D Shader Compiler 47",
         "must_import": ['d3dcompiler_47.dll'],
     },
+
+    # .NET Frameworks
     {
         "id": "dotnet48",
         "verb": "dotnet48",
         "desc": ".NET Framework 4.8",
-        # .NET games use mscoree.dll or reference specific .NET assemblies
         "must_import": ['mscoree.dll', 'mscorwks.dll', 'mscorlib.dll'],
+    },
+    {
+        "id": "dotnet472",
+        "verb": "dotnet472",
+        "desc": ".NET Framework 4.7.2",
+        "must_import": ['mscoree.dll', 'mscorlib.dll'],
+    },
+    {
+        "id": "dotnet40",
+        "verb": "dotnet40",
+        "desc": ".NET Framework 4.0",
+        "must_import": ['mscoree.dll', 'mscorlib.dll'],
     },
     {
         "id": "dotnet35sp1",
@@ -157,18 +320,143 @@ DEPENDENCIES = [
         "must_import": ['mscorwks.dll'],
     },
     {
+        "id": "dotnet20",
+        "verb": "dotnet20",
+        "desc": ".NET Framework 2.0",
+        "must_import": ['mscorwks.dll', 'mscorlib.dll'],
+    },
+
+    # Media / Audio
+    {
         "id": "xact",
         "verb": "xact",
         "desc": "XACT Audio Engine",
-        # Game must import xactengine*.dll or xaudio2*.dll specifically
         "must_import_pattern": [r'xactengine\d*\.dll', r'xaudio2_\d+\.dll'],
     },
+    {
+        "id": "xact_x64",
+        "verb": "xact_x64",
+        "desc": "XACT Audio Engine (64-bit)",
+        "must_import_pattern": [r'xactengine\d*\.dll'],
+    },
+    {
+        "id": "coreaudio",
+        "verb": "coreaudio",
+        "desc": "Core Audio (Windows Media support)",
+        "must_import": ['coreaudio.dll'],
+    },
+    {
+        "id": "amstream",
+        "verb": "amstream",
+        "desc": "ActiveMovie Stream (media playback)",
+        "must_import": ['amstream.dll'],
+    },
+    {
+        "id": "devenum",
+        "verb": "devenum",
+        "desc": "Device Enumeration (media devices)",
+        "must_import": ['devenum.dll'],
+    },
+    {
+        "id": "quartz",
+        "verb": "quartz",
+        "desc": "DirectShow (media framework)",
+        "must_import": ['quartz.dll'],
+    },
+    {
+        "id": "wmvcore",
+        "verb": "wmvcore",
+        "desc": "Windows Media Video Core",
+        "must_import": ['wmvcore.dll', 'wmvds.dll'],
+    },
+
+    # Physics
+    {
+        "id": "physx",
+        "verb": "physx",
+        "desc": "NVIDIA PhysX",
+        "must_import": ['physx3_x64.dll', 'physx3common_x64.dll', 'physx3cooking_x64.dll',
+                        'physx3.dll', 'physx3common.dll', 'physx3cooking.dll',
+                        'physxloader.dll', 'physxcudart.dll'],
+    },
+    {
+        "id": "physx_legacy",
+        "verb": "physx_legacy",
+        "desc": "NVIDIA PhysX (legacy)",
+        "must_import": ['physxloader.dll', 'physxcudart.dll'],
+    },
+
+    # Input
     {
         "id": "xinput",
         "verb": "xinput1_3",
         "desc": "XInput Gamepad Library",
         "must_import": ['xinput1_3.dll'],
-        "skip_if_wine": True,  # Wine provides this
+        "skip_if_wine": True,
+    },
+    {
+        "id": "xinput9_1_0",
+        "verb": "xinput9_1_0",
+        "desc": "XInput Gamepad (older)",
+        "must_import": ['xinput9_1_0.dll'],
+        "skip_if_wine": True,
+    },
+
+    # Crypto / SSL
+    {
+        "id": "winhttp",
+        "verb": "winhttp",
+        "desc": "Windows HTTP Services",
+        "must_import": ['winhttp.dll'],
+        "skip_if_wine": True,
+    },
+    {
+        "id": "crypt32",
+        "verb": "crypt32",
+        "desc": "Windows Crypto API",
+        "must_import": ['crypt32.dll'],
+        "skip_if_wine": True,
+    },
+
+    # Misc
+    {
+        "id": "gdiplus",
+        "verb": "gdiplus",
+        "desc": "GDI+ (graphics)",
+        "must_import": ['gdiplus.dll'],
+        "skip_if_wine": True,
+    },
+    {
+        "id": "riched20",
+        "verb": "riched20",
+        "desc": "Rich Text Control",
+        "must_import": ['riched20.dll', 'riched32.dll'],
+        "skip_if_wine": True,
+    },
+    {
+        "id": "ole32",
+        "verb": "ole32",
+        "desc": "OLE32 (COM support)",
+        "must_import": ['ole32.dll'],
+        "skip_if_wine": True,
+    },
+    {
+        "id": "msxml6",
+        "verb": "msxml6",
+        "desc": "MSXML 6.0 (XML parser)",
+        "must_import": ['msxml6.dll', 'msxml6r.dll'],
+    },
+    {
+        "id": "msxml3",
+        "verb": "msxml3",
+        "desc": "MSXML 3.0 (XML parser)",
+        "must_import": ['msxml3.dll'],
+    },
+    {
+        "id": "dxdiag",
+        "verb": "dxdiag",
+        "desc": "DirectX Diagnostic Tool",
+        "must_import": ['dxdiag.exe'],
     },
 ]
 
