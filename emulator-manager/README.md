@@ -32,6 +32,10 @@ Manage retro emulators from one place. Install AppImages or link your existing i
 
 The plugin downloads the latest AppImage from GitHub releases.
 
+```bash
+emulator-manager corky-install Dolphin
+```
+
 ### Link Existing Emulators
 
 If you already have an emulator installed (via Flatpak, native package, or compiled from source), you can link it instead of downloading an AppImage.
@@ -59,25 +63,25 @@ ls ~/build/emulator/bin/
 
 ```bash
 # Link by name (uses default launch args)
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager link Dolphin /usr/bin/dolphin-emu
+emulator-manager corky-link Dolphin /usr/bin/dolphin-emu
 
 # Link with custom launch args
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager link PCSX2 /usr/bin/pcsx2 "-nofs -fullscreen {rom}"
+emulator-manager corky-link PCSX2 /usr/bin/pcsx2 "-nofs -fullscreen {rom}"
 
 # Link custom emulator (not in built-in list)
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager link my-emulator /path/to/emulator "{rom}"
+emulator-manager corky-link my-emulator /path/to/emulator "{rom}"
 ```
 
 **Unlink an emulator:**
 
 ```bash
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager unlink Dolphin
+emulator-manager corky-unlink Dolphin
 ```
 
 **List linked emulators:**
 
 ```bash
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager linked
+emulator-manager corky-linked
 ```
 
 ### Flatpak Emulators
@@ -89,7 +93,7 @@ Flatpak apps are sandboxed. To link them, use the Flatpak run command:
 flatpak list | grep -i dolphin
 
 # Link with flatpak run
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager link Dolphin /usr/bin/flatpak "run org.DolphinEmu.dolphin-emu -e {rom}"
+emulator-manager corky-link Dolphin /usr/bin/flatpak "run org.DolphinEmu.dolphin-emu -e {rom}"
 ```
 
 ### AppImage Emulators (manually placed)
@@ -97,7 +101,7 @@ flatpak list | grep -i dolphin
 If you have AppImages in a custom location:
 
 ```bash
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager link PCSX2 ~/Applications/pcsx2.AppImage
+emulator-manager corky-link PCSX2 ~/Applications/pcsx2.AppImage
 ```
 
 ## Launch Arguments
@@ -126,7 +130,7 @@ Custom launch args override the defaults when linking.
 Register a game directory with an emulator to add it to the emulator's game list:
 
 ```bash
-~/.local/share/CorkyTux/plugins/emulator-manager/emulator-manager register-game Dolphin /path/to/game
+emulator-manager corky-register-game Dolphin /path/to/game
 ```
 
 ## Troubleshooting
