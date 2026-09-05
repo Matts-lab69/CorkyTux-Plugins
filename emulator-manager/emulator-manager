@@ -34,6 +34,7 @@ EMULATORS = {
         "github": "carlos-a-g-h/melonds-anylinux-appimage",
         "asset_pattern": "melonDS",
         "launch_args": "{rom}",
+        "settings": [],
     },
     "Dolphin": {
         "description": "GameCube / Wii",
@@ -41,6 +42,12 @@ EMULATORS = {
         "github": "pkgforge-dev/Dolphin-emu-AppImage",
         "asset_pattern": "Dolphin_Emulator",
         "launch_args": "-e {rom}",
+        "settings": [
+            {"id": "batch", "type": "bool", "default": False,
+             "desc": "Lote (ejecutar sin abrir GUI de Dolphin)"},
+            {"id": "user_dir", "type": "path", "default": "",
+             "desc": "Directorio de usuario personalizado"},
+        ],
     },
     "Mupen64Plus": {
         "description": "Nintendo 64",
@@ -48,6 +55,12 @@ EMULATORS = {
         "github": "DarkSamus669/mupen64plus-appimage",
         "asset_pattern": "mupen64plus",
         "launch_args": "{rom}",
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "hide_osd", "type": "bool", "default": False,
+             "desc": "Ocultar OSD (overlay de pantalla)"},
+        ],
     },
     "PCSX2": {
         "description": "PlayStation 2",
@@ -55,6 +68,12 @@ EMULATORS = {
         "github": "PCSX2/pcsx2",
         "asset_pattern": "pcsx2",
         "launch_args": "-nofs -fullscreen {rom}",
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "exit_on_pause", "type": "bool", "default": False,
+             "desc": "Salir al abrir menú de pausa"},
+        ],
     },
     "PPSSPP": {
         "description": "PlayStation Portable",
@@ -62,6 +81,10 @@ EMULATORS = {
         "github": "hrydgard/ppsspp",
         "asset_pattern": "PPSSPP",
         "launch_args": "{rom}",
+        "settings": [
+            {"id": "no_gui", "type": "bool", "default": False,
+             "desc": "Sin GUI (ejecutar directamente el juego)"},
+        ],
     },
     "RPCS3": {
         "description": "PlayStation 3",
@@ -69,6 +92,14 @@ EMULATORS = {
         "github": "Blackfox-Thane/RPCS3-AppImage-Enhanced",
         "asset_pattern": "RPCS3",
         "launch_args": "{rom}",
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "full_boot", "type": "bool", "default": False,
+             "desc": "Arranque completo (sin saltar animación PS3)"},
+            {"id": "no_gui", "type": "bool", "default": False,
+             "desc": "Sin GUI (ejecutar directamente el juego)"},
+        ],
     },
     "Ryujinx": {
         "description": "Nintendo Switch",
@@ -76,6 +107,12 @@ EMULATORS = {
         "github": "Ryujinx/Ryujinx",
         "asset_pattern": "Ryujinx",
         "launch_args": "{rom}",
+        "settings": [
+            {"id": "keys_path", "type": "path", "default": "",
+             "desc": "Ruta de claves de cifrado (prod.keys)"},
+            {"id": "title_keys_path", "type": "path", "default": "",
+             "desc": "Ruta de claves de título (title.keys)"},
+        ],
     },
     "Vita3K": {
         "description": "PlayStation Vita",
@@ -83,6 +120,14 @@ EMULATORS = {
         "github": "Vita3K/Vita3K",
         "asset_pattern": "Vita3K",
         "launch_args": "{rom}",
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "config_path", "type": "path", "default": "",
+             "desc": "Ubicación de configuración personalizada"},
+            {"id": "load_config", "type": "bool", "default": False,
+             "desc": "Cargar archivo de configuración"},
+        ],
     },
     "Azahar": {
         "description": "Nintendo 3DS",
@@ -90,6 +135,7 @@ EMULATORS = {
         "github": "pkgforge-dev/Azahar-AppImage-Enhanced",
         "asset_pattern": "Azahar",
         "launch_args": "{rom}",
+        "settings": [],
     },
     "DuckStation": {
         "description": "PlayStation 1",
@@ -97,6 +143,7 @@ EMULATORS = {
         "github": "stenzek/duckstation",
         "asset_pattern": "DuckStation",
         "launch_args": "-batch {rom}",
+        "settings": [],
     },
     "Cemu": {
         "description": "Wii U",
@@ -104,6 +151,12 @@ EMULATORS = {
         "github": "cemu-project/Cemu",
         "asset_pattern": "Cemu",
         "launch_args": "-f {rom}",
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "mlc_path", "type": "path", "default": "",
+             "desc": "Ubicación personalizada de la carpeta mlc"},
+        ],
     },
     "Desmume": {
         "description": "Nintendo DS",
@@ -111,6 +164,7 @@ EMULATORS = {
         "github": "pkgforge-dev/DeSmuME-AppImage",
         "asset_pattern": "DeSmuME",
         "launch_args": "{rom}",
+        "settings": [],
     },
 }
 
@@ -195,6 +249,7 @@ def list_emulators():
             "path": get_path(name),
             "launch_args": get_launch_args(name),
             "linked": is_link,
+            "settings": info.get("settings", []),
         })
     # Add linked emulators not in EMULATORS list (custom/unknown)
     for name, data in linked.items():
