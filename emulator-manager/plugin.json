@@ -1,8 +1,8 @@
 {
   "name": "Emulator Manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "entry": "emulator-manager",
-  "description": "Gestor de emuladores retro. Descarga e instala emuladores como AppImages.",
+  "description": "Manage retro emulators. Install AppImages or link existing installs (Flatpak, native, compiled).",
   "capabilities": ["emulators"],
   "type": "emulator-manager",
   "protocol": {
