@@ -291,6 +291,13 @@ def find_wine(proton_path=None):
     return None
 
 
+def emit_progress(dep_id, desc, status, error=None):
+    """Emit a single JSON line for real-time progress."""
+    json.dump({"type": "progress", "id": dep_id, "desc": desc, "status": status, "error": error}, sys.stdout)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
 def install_deps(prefix, deps, proton_path=None):
     """Install dependencies using winetricks."""
     if not prefix or not os.path.isdir(prefix):
@@ -304,8 +311,9 @@ def install_deps(prefix, deps, proton_path=None):
 
     results = []
     failed = []
+    total = len(deps)
 
-    for dep_id in deps:
+    for idx, dep_id in enumerate(deps):
         # Find the dependency definition
         dep_def = None
         for d in DEPENDENCIES:
@@ -316,7 +324,10 @@ def install_deps(prefix, deps, proton_path=None):
         if not dep_def:
             results.append({"id": dep_id, "ok": False, "error": "Unknown dependency"})
             failed.append(dep_id)
+            emit_progress(dep_id, dep_id, "error", "Unknown dependency")
             continue
+
+        emit_progress(dep_id, dep_def["desc"], "installing")
 
         # Set up environment
         env = os.environ.copy()
@@ -341,8 +352,11 @@ def install_deps(prefix, deps, proton_path=None):
                 "ok": ok,
                 "error": proc.stderr.strip() if not ok else None,
             })
-            if not ok:
+            if ok:
+                emit_progress(dep_id, dep_def["desc"], "done")
+            else:
                 failed.append(dep_id)
+                emit_progress(dep_id, dep_def["desc"], "error", proc.stderr.strip()[:200] if proc.stderr else "Install failed")
         except subprocess.TimeoutExpired:
             results.append({
                 "id": dep_id,
@@ -351,6 +365,7 @@ def install_deps(prefix, deps, proton_path=None):
                 "error": "Installation timed out (5 min limit)",
             })
             failed.append(dep_id)
+            emit_progress(dep_id, dep_def["desc"], "error", "Timed out")
         except Exception as e:
             results.append({
                 "id": dep_id,
@@ -359,13 +374,18 @@ def install_deps(prefix, deps, proton_path=None):
                 "error": str(e),
             })
             failed.append(dep_id)
+            emit_progress(dep_id, dep_def["desc"], "error", str(e))
 
+    # Final summary line
     json.dump({
+        "type": "done",
         "ok": len(failed) == 0,
         "results": results,
         "installed": [r["id"] for r in results if r["ok"]],
         "failed": failed,
     }, sys.stdout)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 
 def main():
