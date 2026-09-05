@@ -1,0 +1,12 @@
+{
+  "name": "Dependency Installer",
+  "version": "1.0.0",
+  "entry": "dependency-installer",
+  "description": "Automatically detects and installs missing Windows dependencies (Visual C++ runtimes, DirectX, .NET, etc.) for games using winetricks.",
+  "capabilities": ["scan", "install"],
+  "protocol": {
+    "stdout": "single JSON document per invocation",
+    "exitCodes": { "0": "ok", "2": "usage/invalid path", "3": "install failed" }
+  },
+  "source": "Matts-lab69/CorkyTux-Plugins"
+}

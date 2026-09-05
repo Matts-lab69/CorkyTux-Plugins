@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Dependency Installer — CorkyTux plugin (v1.0.0).
+
+Detects and installs missing Windows dependencies for games running
+under Proton/Wine. Uses winetricks to install Visual C++ runtimes,
+DirectX components, .NET frameworks, and other common dependencies.
+
+Usage:
+  dependency-installer scan <gamedir>
+  dependency-installer install --prefix P [--proton PATH] dep1 [dep2 ...]
+
+Commands:
+  scan <gamedir>     Scan game directory for dependency hints, return
+                     list of recommended deps as JSON.
+  install            Install specified dependencies into the prefix.
+
+Every command prints ONE JSON document on stdout.
+Exit codes: 0 ok, 2 usage/invalid, 3 install failed.
+
+Dependencies detected by scan:
+  - vcrun2015    — Visual C++ 2015-2022 redistributable (universal)
+  - vcrun2013    — Visual C++ 2013 redistributable
+  - vcrun2012    — Visual C++ 2012 redistributable
+  - vcrun2010    — Visual C++ 2010 redistributable
+  - vcrun2008    — Visual C++ 2008 redistributable
+  - d3dx9        — DirectX 9 runtime
+  - d3dx11_43    — DirectX 11 runtime
+  - d3dcompiler_47 — Direct3D shader compiler
+  - dotnet48     — .NET Framework 4.8
+  - dotnet35sp1  — .NET Framework 3.5 SP1
+  - xact         — XACT audio engine
+  - xinput       — XInput gamepad library
+  -PhysX        — NVIDIA PhysX
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# ---------------------------------------------------------------------------
+# Dependency definitions: (id, winetricks verb, detection files, description)
+# ---------------------------------------------------------------------------
+
+DEPENDENCIES = [
+    {
+        "id": "vcrun2015",
+        "verb": "vcrun2015",
+        "desc": "Visual C++ 2015-2022 Redistributable",
+        "detect_files": [
+            "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll",
+            "msvcp140_codecvt_ids.dll", "concrt140.dll", "vcomp140.dll",
+        ],
+        "common": True,
+    },
+    {
+        "id": "vcrun2013",
+        "verb": "vcrun2013",
+        "desc": "Visual C++ 2013 Redistributable",
+        "detect_files": [
+            "msvcp120.dll", "vcruntime120.dll", "msvcr120.dll",
+            "vcomp120.dll", "concrt120.dll",
+        ],
+        "common": True,
+    },
+    {
+        "id": "vcrun2012",
+        "verb": "vcrun2012",
+        "desc": "Visual C++ 2012 Redistributable",
+        "detect_files": [
+            "msvcp110.dll", "vcomp110.dll", "msvcr110.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "vcrun2010",
+        "verb": "vcrun2010",
+        "desc": "Visual C++ 2010 Redistributable",
+        "detect_files": [
+            "msvcp100.dll", "msvcr100.dll", "vcomp100.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "vcrun2008",
+        "verb": "vcrun2008",
+        "desc": "Visual C++ 2008 Redistributable",
+        "detect_files": [
+            "msvcp90.dll", "msvcr90.dll", "vcomp90.dll",
+            "msvcr80.dll", "msvcp80.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "d3dx9",
+        "verb": "d3dx9",
+        "desc": "DirectX 9 Runtime",
+        "detect_files": [
+            "d3dx9_25.dll", "d3dx9_26.dll", "d3dx9_27.dll",
+            "d3dx9_28.dll", "d3dx9_29.dll", "d3dx9_30.dll",
+            "d3dx9_31.dll", "d3dx9_32.dll", "d3dx9_33.dll",
+            "d3dx9_34.dll", "d3dx9_35.dll", "d3dx9_36.dll",
+            "d3dx9_37.dll", "d3dx9_38.dll", "d3dx9_39.dll",
+            "d3dx9_40.dll", "d3dx9_41.dll", "d3dx9_42.dll",
+            "d3dx9_43.dll",
+        ],
+        "common": True,
+    },
+    {
+        "id": "d3dx11_43",
+        "verb": "d3dx11_43",
+        "desc": "DirectX 11 Runtime",
+        "detect_files": [
+            "d3dx11_43.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "d3dcompiler_47",
+        "verb": "d3dcompiler_47",
+        "desc": "Direct3D Shader Compiler 47",
+        "detect_files": [
+            "d3dcompiler_47.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "dotnet48",
+        "verb": "dotnet48",
+        "desc": ".NET Framework 4.8",
+        "detect_files": [
+            "mscorlib.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "dotnet35sp1",
+        "verb": "dotnet35sp1",
+        "desc": ".NET Framework 3.5 SP1",
+        "detect_files": [
+            "mscorlib.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "xact",
+        "verb": "xact",
+        "desc": "XACT Audio Engine",
+        "detect_files": [
+            "xactengine*.dll", "x3daudio*.dll", "xaudio2*.dll",
+        ],
+        "common": False,
+    },
+    {
+        "id": "xinput",
+        "verb": "xinput1_3",
+        "desc": "XInput Gamepad Library",
+        "detect_files": [
+            "xinput1_3.dll", "xinput1_4.dll", "xinput9_1_0.dll",
+        ],
+        "common": False,
+    },
+]
+
+
+def err(msg, code=2):
+    """Print error JSON and exit."""
+    json.dump({"ok": False, "error": msg}, sys.stdout)
+    sys.exit(code)
+
+
+def find_exe_files(directory, extensions=(".exe", ".dll")):
+    """Recursively find all files with given extensions."""
+    results = []
+    for root, dirs, files in os.walk(directory):
+        for f in files:
+            if any(f.lower().endswith(ext) for ext in extensions):
+                results.append(os.path.join(root, f))
+    return results
+
+
+def scan_game(game_dir):
+    """Scan a game directory for dependency hints."""
+    if not game_dir or not os.path.isdir(game_dir):
+        err(f"Invalid game directory: {game_dir}")
+
+    exe_files = find_exe_files(game_dir)
+    if not exe_files:
+        json.dump({"ok": True, "deps": [], "message": "No executables found"}, sys.stdout)
+        return
+
+    # Read all DLL names present in the game directory
+    dll_names = set()
+    for f in exe_files:
+        dll_names.add(os.path.basename(f).lower())
+
+    # Check which dependencies are hinted at
+    detected = []
+    for dep in DEPENDENCIES:
+        # Check if any detect_files are referenced but missing
+        # Heuristic: if the game has .exe files and common deps like vcrun2015
+        # are very likely needed, include them as recommendations
+        if dep["common"]:
+            detected.append({
+                "id": dep["id"],
+                "desc": dep["desc"],
+                "confidence": "recommended",
+            })
+            continue
+
+        # For non-common deps, check if any detect files are present
+        # (indicating the game ships its own copy, which is common)
+        has_own = False
+        for pattern in dep["detect_files"]:
+            # Simple glob-like matching
+            if "*" in pattern:
+                prefix = pattern.split("*")[0].lower()
+                suffix = pattern.split("*")[-1].lower() if "*" in pattern else ""
+                for dll in dll_names:
+                    if dll.startswith(prefix) and dll.endswith(suffix):
+                        has_own = True
+                        break
+            elif pattern.lower() in dll_names:
+                has_own = True
+                break
+
+        if not has_own:
+            # Game doesn't ship this dep — recommend installing it
+            detected.append({
+                "id": dep["id"],
+                "desc": dep["desc"],
+                "confidence": "suggested",
+            })
+
+    json.dump({
+        "ok": True,
+        "deps": detected,
+        "game_dir": game_dir,
+        "total_dlls": len([f for f in exe_files if f.lower().endswith(".dll")]),
+        "total_exes": len([f for f in exe_files if f.lower().endswith(".exe")]),
+    }, sys.stdout)
+
+
+def find_winetricks(proton_path=None):
+    """Find winetricks binary from Proton directory or system."""
+    candidates = []
+
+    if proton_path:
+        # Look inside Proton directory
+        for sub in [
+            "protonfixes/winetricks",
+            "protonfixes/files/bin/winetricks",
+        ]:
+            candidates.append(os.path.join(proton_path, sub))
+
+    # System winetricks
+    sys_wt = shutil.which("winetricks")
+    if sys_wt:
+        candidates.append(sys_wt)
+
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def find_wine(proton_path=None):
+    """Find wine binary from Proton directory or system."""
+    candidates = []
+
+    if proton_path:
+        for sub in ["files/bin/wine64", "files/bin/wine"]:
+            candidates.append(os.path.join(proton_path, sub))
+
+    sys_wine = shutil.which("wine64") or shutil.which("wine")
+    if sys_wine:
+        candidates.append(sys_wine)
+
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def install_deps(prefix, deps, proton_path=None):
+    """Install dependencies using winetricks."""
+    if not prefix or not os.path.isdir(prefix):
+        err(f"Invalid prefix: {prefix}")
+
+    winetricks = find_winetricks(proton_path)
+    if not winetricks:
+        err("winetricks not found. Install winetricks or use a Proton with bundled winetricks.")
+
+    wine = find_wine(proton_path)
+
+    results = []
+    failed = []
+
+    for dep_id in deps:
+        # Find the dependency definition
+        dep_def = None
+        for d in DEPENDENCIES:
+            if d["id"] == dep_id:
+                dep_def = d
+                break
+
+        if not dep_def:
+            results.append({"id": dep_id, "ok": False, "error": "Unknown dependency"})
+            failed.append(dep_id)
+            continue
+
+        # Set up environment
+        env = os.environ.copy()
+        env["WINEPREFIX"] = prefix
+        if wine:
+            env["WINE"] = wine
+        # Disable winetricks GUI prompts
+        env["WINETRICKS_GUI"] = "0"
+
+        try:
+            proc = subprocess.run(
+                [winetricks, "-q", dep_def["verb"]],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout per dep
+            )
+            ok = proc.returncode == 0
+            results.append({
+                "id": dep_id,
+                "desc": dep_def["desc"],
+                "ok": ok,
+                "error": proc.stderr.strip() if not ok else None,
+            })
+            if not ok:
+                failed.append(dep_id)
+        except subprocess.TimeoutExpired:
+            results.append({
+                "id": dep_id,
+                "desc": dep_def["desc"],
+                "ok": False,
+                "error": "Installation timed out (5 min limit)",
+            })
+            failed.append(dep_id)
+        except Exception as e:
+            results.append({
+                "id": dep_id,
+                "desc": dep_def["desc"],
+                "ok": False,
+                "error": str(e),
+            })
+            failed.append(dep_id)
+
+    json.dump({
+        "ok": len(failed) == 0,
+        "results": results,
+        "installed": [r["id"] for r in results if r["ok"]],
+        "failed": failed,
+    }, sys.stdout)
+
+
+def main():
+    if len(sys.argv) < 2:
+        err("Usage: dependency-installer <scan|install> [args]")
+
+    cmd = sys.argv[1]
+
+    if cmd == "scan":
+        if len(sys.argv) < 3:
+            err("Usage: dependency-installer scan <gamedir>")
+        scan_game(sys.argv[2])
+
+    elif cmd == "install":
+        # Parse args: --prefix P [--proton PATH] dep1 [dep2 ...]
+        prefix = None
+        proton_path = None
+        deps = []
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--prefix" and i + 1 < len(sys.argv):
+                prefix = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--proton" and i + 1 < len(sys.argv):
+                proton_path = sys.argv[i + 1]
+                i += 2
+            else:
+                deps.append(sys.argv[i])
+                i += 1
+
+        if not prefix:
+            err("--prefix is required")
+        if not deps:
+            err("At least one dependency ID is required")
+
+        install_deps(prefix, deps, proton_path)
+
+    else:
+        err(f"Unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main()
