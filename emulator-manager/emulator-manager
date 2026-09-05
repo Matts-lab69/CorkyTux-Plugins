@@ -142,7 +142,10 @@ EMULATORS = {
         "github": "pkgforge-dev/Azahar-AppImage-Enhanced",
         "asset_pattern": "Azahar",
         "launch_args": "{rom}",
-        "settings": [],
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+        ],
     },
     "DuckStation": {
         "description": "PlayStation 1",
@@ -150,7 +153,12 @@ EMULATORS = {
         "github": "stenzek/duckstation",
         "asset_pattern": "DuckStation",
         "launch_args": "-batch {rom}",
-        "settings": [],
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "no_gui", "type": "bool", "default": False,
+             "desc": "Sin GUI (ejecutar directamente el juego)"},
+        ],
     },
     "Cemu": {
         "description": "Wii U",
@@ -171,7 +179,12 @@ EMULATORS = {
         "github": "pkgforge-dev/DeSmuME-AppImage",
         "asset_pattern": "DeSmuME",
         "launch_args": "{rom}",
-        "settings": [],
+        "settings": [
+            {"id": "fullscreen", "type": "bool", "default": True,
+             "desc": "Pantalla completa"},
+            {"id": "frameskip", "type": "bool", "default": False,
+             "desc": "Saltar cuadros (mayor velocidad)"},
+        ],
     },
 }
 
