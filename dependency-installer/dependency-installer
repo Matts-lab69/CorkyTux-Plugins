@@ -467,13 +467,7 @@ DEPENDENCIES = [
         "must_import": ['dxdiag.exe'],
     },
 
-    # DXVK (DirectX over Vulkan — required for d3d8/9/10/11)
-    {
-        "id": "dxvk",
-        "verb": "dxvk",
-        "desc": "DXVK (DirectX over Vulkan)",
-        "must_import": ['d3d8.dll', 'd3d9.dll', 'd3d11.dll', 'dxgi.dll'],
-    },
+    # DXVK is NOT needed — Proton bundles it internally.
 ]
 
 
@@ -548,45 +542,17 @@ def scan_game(game_dir, prefix=None, proton_path=None):
         dlls = extract_dll_names(f)
         all_dlls.update(dlls)
 
-    # Step 2: Separate Wine built-ins, DXVK-needed, and external
+    # Step 2: Separate Wine built-ins from external
     wine_dlls = set()
-    dxvk_needed = set()
     external_dlls = set()
     for dll in all_dlls:
         if is_wine_builtin(dll):
             wine_dlls.add(dll)
-        elif is_dxvk_dll(dll):
-            dxvk_needed.add(dll)
         else:
             external_dlls.add(dll)
 
-    # Step 2b: Check if DXVK is installed in prefix (needed for all dxvk_needed)
-    dxvk_installed = False
-    if prefix:
-        sys32 = os.path.join(prefix, "drive_c", "windows", "system32")
-        dxvk_check = os.path.join(sys32, "d3d11.dll")
-        if os.path.isfile(dxvk_check) and os.path.getsize(dxvk_check) > 1000:
-            dxvk_installed = True
-
     # Step 3: Check each dependency
     detected = []
-
-    # Auto-detect DXVK if game needs it
-    if dxvk_needed:
-        if dxvk_installed:
-            detected.append({
-                "id": "dxvk",
-                "desc": "DXVK (DirectX over Vulkan)",
-                "confidence": "installed",
-                "status": "installed",
-            })
-        else:
-            detected.append({
-                "id": "dxvk",
-                "desc": "DXVK (DirectX over Vulkan)",
-                "confidence": "detected",
-                "evidence": sorted(dxvk_needed)[:3],
-            })
 
     for dep in DEPENDENCIES:
         # If Wine provides this, skip entirely
@@ -748,50 +714,6 @@ def find_wine(proton_path=None):
     return None
 
 
-DXVK_VERSION = "2.6.1"
-DXVK_URL = f"https://github.com/doitsujin/dxvk/releases/download/v{DXVK_VERSION}/dxvk-{DXVK_VERSION}.tar.gz"
-
-def install_dxvk(prefix, proton_path=None):
-    """Download and install DXVK into the prefix."""
-    import tarfile
-    import tempfile
-
-    sys32 = os.path.join(prefix, "drive_c", "windows", "system32")
-    syswow64 = os.path.join(prefix, "drive_c", "windows", "syswow64")
-    os.makedirs(sys32, exist_ok=True)
-    os.makedirs(syswow64, exist_ok=True)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tarball = os.path.join(tmpdir, "dxvk.tar.gz")
-        try:
-            subprocess.run(["curl", "-fSL", "-o", tarball, DXVK_URL],
-                           timeout=60, check=True)
-        except Exception as e:
-            return False, f"Download failed: {e}"
-
-        try:
-            with tarfile.open(tarball, "r:gz") as tar:
-                tar.extractall(tmpdir)
-        except Exception as e:
-            return False, f"Extract failed: {e}"
-
-        src_dir = os.path.join(tmpdir, f"dxvk-{DXVK_VERSION}")
-        # x64 DLLs go to system32, x32 DLLs go to syswow64
-        dxvk_dlls = ['d3d8.dll', 'd3d9.dll', 'd3d10core.dll', 'd3d11.dll', 'dxgi.dll']
-        installed = []
-        for sub, dest in [("x64", sys32), ("x32", syswow64)]:
-            src = os.path.join(src_dir, sub)
-            if not os.path.isdir(src):
-                continue
-            for dll in dxvk_dlls:
-                src_file = os.path.join(src, dll)
-                if os.path.isfile(src_file):
-                    shutil.copy2(src_file, os.path.join(dest, dll))
-                    installed.append(dll)
-
-    return len(installed) > 0, installed
-
-
 def emit_progress(dep_id, desc, status, error=None):
     json.dump({"type": "progress", "id": dep_id, "desc": desc, "status": status, "error": error}, sys.stdout)
     sys.stdout.write("\n")
@@ -826,18 +748,6 @@ def install_deps(prefix, deps, proton_path=None):
             continue
 
         emit_progress(dep_id, dep_def["desc"], "installing")
-
-        # DXVK is installed differently (not via winetricks)
-        if dep_id == "dxvk":
-            ok, detail = install_dxvk(prefix, proton_path)
-            if ok:
-                results.append({"id": dep_id, "desc": dep_def["desc"], "ok": True})
-                emit_progress(dep_id, dep_def["desc"], "done")
-            else:
-                results.append({"id": dep_id, "desc": dep_def["desc"], "ok": False, "error": str(detail)})
-                failed.append(dep_id)
-                emit_progress(dep_id, dep_def["desc"], "error", str(detail))
-            continue
 
         env = os.environ.copy()
         env["WINEPREFIX"] = prefix
