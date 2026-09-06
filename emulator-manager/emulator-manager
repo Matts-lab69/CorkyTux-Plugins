@@ -17,6 +17,7 @@ Commands:
 
 import json
 import os
+import shutil
 import sys
 import urllib.request
 import urllib.error
@@ -26,6 +27,22 @@ import stat
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 EMULATORS_DIR = os.path.join(PLUGIN_DIR, "emulators")
 LINKED_FILE = os.path.join(PLUGIN_DIR, "linked.json")
+
+# System binary names for emulators (shutil.which detection)
+SYSTEM_NAMES = {
+    "melonDS": ["melonDS", "melonds"],
+    "Dolphin": ["dolphin-emu", "dolphin-emu-nogui"],
+    "Mupen64Plus": ["mupen64plus", "mupen64plus-qt"],
+    "PCSX2": ["pcsx2-qt", "pcsx2"],
+    "PPSSPP": ["ppsspp-qt", "ppsspp", "PPSSPPQt"],
+    "RPCS3": ["rpcs3", "rpcs3-qt"],
+    "Ryujinx": ["Ryujinx", "ryujinx"],
+    "DuckStation": ["duckstation-qt", "duckstation"],
+    "Desmume": ["desmume", "desmume-qt"],
+    "Azahar": ["azahar", "azahar-qt"],
+    "Cemu": ["Cemu", "cemu"],
+    "Vita3K": ["Vita3K", "vita3k"],
+}
 
 EMULATORS = {
     "melonDS": {
@@ -218,29 +235,36 @@ def get_arch():
 
 
 def is_installed(name):
-    """Check if emulator is installed (AppImage or linked)."""
-    # Check linked first
+    """Check if emulator is installed (AppImage, linked, or system)."""
     linked = load_linked()
     if name in linked:
         path = linked[name].get("path", "")
         return os.path.isfile(path) and os.access(path, os.X_OK)
-    # Check AppImage
     path = os.path.join(EMULATORS_DIR, name + ".AppImage")
-    return os.path.isfile(path) and os.access(path, os.X_OK)
+    if os.path.isfile(path) and os.access(path, os.X_OK):
+        return True
+    # Check system binaries
+    for bin_name in SYSTEM_NAMES.get(name, []):
+        if shutil.which(bin_name):
+            return True
+    return False
 
 
 def get_path(name):
-    """Get emulator path (linked or AppImage)."""
-    # Check linked first
+    """Get emulator path (linked, AppImage, or system)."""
     linked = load_linked()
     if name in linked:
         path = linked[name].get("path", "")
         if os.path.isfile(path):
             return path
-    # Check AppImage
     path = os.path.join(EMULATORS_DIR, name + ".AppImage")
     if os.path.isfile(path):
         return path
+    # Check system binaries
+    for bin_name in SYSTEM_NAMES.get(name, []):
+        found = shutil.which(bin_name)
+        if found:
+            return found
     return ""
 
 
