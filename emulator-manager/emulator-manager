@@ -183,7 +183,7 @@ EMULATORS = {
             {"id": "fullscreen", "type": "bool", "default": True,
              "desc": "Pantalla completa"},
             {"id": "frameskip", "type": "bool", "default": False,
-             "desc": "Saltar cuadros (mayor velocidad)"},
+             "desc": "Saltar frames (mayor velocidad, menos fluido)"},
         ],
     },
 }
