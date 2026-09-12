@@ -963,10 +963,13 @@ def _epic_search_url(title: str) -> str:
 
 
 def _epic_page_slug(el) -> str:
-    # catalogNs.mappings[0].pageSlug is the authoritative store slug
+    # catalogNs.mappings pageSlug is the authoritative store slug
     # (urlSlug is often a UUID or a stale-but-clean string that 404s).
+    # Prefer the productHome mapping (info/demo/offer pages 500).
     try:
-        for m in (el.get("catalogNs") or {}).get("mappings") or []:
+        maps = (el.get("catalogNs") or {}).get("mappings") or []
+        ordered = sorted(maps, key=lambda m: 0 if (m or {}).get("pageType") == "productHome" else 1)
+        for m in ordered:
             ps = str((m or {}).get("pageSlug") or "").split("?")[0].rstrip("/")
             if ps and "/" not in ps:
                 return ps
@@ -990,32 +993,131 @@ def _epic_slug_url(el):
 
 def _epic_price(el):
     total = ((el.get("price") or {}).get("totalPrice") or {})
-    fmt = (total.get("fmtPrice") or {})
-    return (fmt.get("discountPrice") or "", fmt.get("originalPrice") or "",
-            total.get("currencyCode") or "")
+    fmt = total.get("fmtPrice") or {}
+    disc, orig = fmt.get("discountPrice") or "", fmt.get("originalPrice") or ""
+    if (not disc or not orig) and total.get("currencyCode"):
+        # Catalog search omits fmtPrice: format from cent numbers.
+        cur = total.get("currencyCode") or "USD"
+        sym = "$" if cur == "USD" else (cur + " ")
+        try:
+            d = float(total.get("discountPrice") or 0) / 100.0
+            o = float(total.get("originalPrice") or 0) / 100.0
+            if o > 0:
+                disc, orig = f"{sym}{d:.2f}", f"{sym}{o:.2f}"
+        except (ValueError, TypeError):
+            pass
+    return disc, orig, total.get("currencyCode") or ""
+
+
+def _epic_sale_search(count=80):
+    """Full on-sale catalog via the public store GraphQL (the weekly
+    freeGamesPromotions feed only carries ~12 items). The API caps pages
+    at 40, so paginate."""
+    import urllib.request
+    fields = """elements {
+        title description urlSlug productSlug
+        catalogNs { mappings { pageSlug pageType } }
+        keyImages { type url }
+        price(country: "US") {
+          totalPrice { discountPrice originalPrice currencyCode
+                       fmtPrice { discountPrice originalPrice } }
+        }
+        promotions { promotionalOffers { promotionalOffers {
+          startDate endDate discountSetting { discountPercentage } } } }
+      }"""
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+               "Content-Type": "application/json", "Accept": "application/json"}
+    out, start, want = [], 0, max(1, min(120, count))
+    while len(out) < want:
+        query = """query {
+  Catalog {
+    searchStore(category: "games", count: %d, country: "US", keywords: "",
+                locale: "en-US", onSale: true, sortBy: "relevancy",
+                sortDir: "DESC", start: %d) {
+      %s
+    }
+  }
+}""" % (min(40, want - len(out)), start, fields)
+        body = json.dumps({"query": query}).encode()
+        req = urllib.request.Request("https://store.epicgames.com/graphql", data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        els = (((data.get("data") or {}).get("Catalog") or {}).get("searchStore") or {}).get("elements") or []
+        if not els:
+            break
+        out.extend(els)
+        start += len(els)
+    return out
+
+
+def _epic_price_pct(el) -> int:
+    try:
+        total = (el.get("price") or {}).get("totalPrice") or {}
+        d, o = float(total.get("discountPrice") or 0), float(total.get("originalPrice") or 0)
+        if o > 0 and d < o:
+            return int(round((1.0 - d / o) * 100))
+    except (ValueError, TypeError):
+        pass
+    return 0
 
 
 def cmd_epic_deals(_args):
     import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    out, seen, seen_urls = [], set(), set()
     try:
         elements = _epic_catalog()
-    except Exception as e:
-        die(3, f"Could not fetch Epic offers: {e}")
-    now = _dt.datetime.now(_dt.timezone.utc)
-    out = []
+    except Exception:
+        elements = []
+    # 1) Verified promo-window deals first (with end dates).
+    # pct >= 100 is a free promo, not a deal (lives in Free games now).
     for el in elements:
         active, pct, end = _epic_offer_summary(el, now)
-        if not active or pct == 0:
+        if not active or pct <= 0 or pct >= 100:
             continue
+        title = el.get("title", "")
+        seen.add(title.casefold())
         disc, orig, _cur = _epic_price(el)
-        out.append({"title": el.get("title", ""),
+        out.append({"title": title,
                     "description": el.get("description", ""),
                     "cover": _epic_catalog_cover(el),
                     "discount": pct,
                     "price": disc, "base_price": orig,
                     "ends": end,
                     "store_url": _epic_slug_url(el)})
+    # 2) Fill up with the full on-sale catalog (summer sale & co).
+    try:
+        extra = _epic_sale_search(80)
+    except Exception:
+        extra = []
+    for el in extra:
+        title = el.get("title", "") or ""
+        if not title or title.casefold() in seen:
+            continue
+        active, pct, end = _epic_offer_summary(el, now)
+        if not active or pct <= 0:
+            pct = _epic_price_pct(el)
+            end = ""
+        if pct <= 0 or pct >= 100:
+            continue
+        url = _epic_slug_url(el)
+        if url in seen_urls:
+            continue
+        seen.add(title.casefold())
+        seen_urls.add(url)
+        disc, orig, _cur = _epic_price(el)
+        out.append({"title": title,
+                    "description": el.get("description", ""),
+                    "cover": _epic_catalog_cover(el),
+                    "discount": pct,
+                    "price": disc, "base_price": orig,
+                    "ends": end,
+                    "store_url": url})
+        if len(out) >= 80:
+            break
     out.sort(key=lambda x: -(x["discount"] or 0))
+    if not out:
+        die(3, "Could not fetch Epic offers")
     emit({"type": "done", "ok": True, "store": "epic", "deals": out})
 
 
