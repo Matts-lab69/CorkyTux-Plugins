@@ -831,10 +831,11 @@ def cmd_login_window(args):
     try:
         import gi
         gi.require_version("Gtk", "4.0")
-        gi.require_version("WebKit2", "4.1")
-        from gi.repository import Gtk, WebKit2, GLib
+        gi.require_version("WebKit", "6.0")
+        from gi.repository import Gtk, WebKit as WebKit2, GLib
     except (ImportError, ValueError) as e:
-        die(3, f"Login window needs PyGObject WebKit2: {e}")
+        die(3, f"Login window needs PyGObject WebKitGTK 6.0 for GTK4 "
+               f"(e.g. net-libs/webkit-gtk:6 on Gentoo). Or paste the code manually: {e}")
     store = args.store
     got = {"code": ""}
 
@@ -861,38 +862,24 @@ def cmd_login_window(args):
     hint.set_wrap(True)
     col.append(hint)
 
-    def grab_epic_now():
-        def on_js(view, result, _ud):
-            try:
-                text = view.run_javascript_finish(result).get_js_value().to_string()
-                try:
-                    doc = json.loads(text)
-                    code = str(doc.get("authorizationCode") or "")
-                except ValueError:
-                    code = ""
-                if code and code != "null":
-                    finish(code)
-                else:
-                    hint.set_text("No code on this page yet — finish signing in, then wait or press Grab code again.")
-            except Exception:
-                hint.set_text("Could not read the page yet — press Grab code again.")
-        web.run_javascript("document.body ? document.body.innerText : ''", None, on_js, None)
+    def code_in_uri(uri: str) -> str:
+        # Epic lands on .../id/api/redirect?authorizationCode=XXX after login;
+        # GOG lands on .../on_login_success?...&code=XXX. No JS needed.
+        if store == "gog":
+            return _query_param(uri, "code") if "on_login_success" in uri else ""
+        return _query_param(uri, "authorizationCode") if "id/api/redirect" in uri else ""
+
+    def grab_current():
+        uri = web.get_uri() or ""
+        if code_in_uri(uri):
+            finish(code_in_uri(uri))
+        else:
+            hint.set_text("No code in the address yet — finish signing in first.")
 
     grab_btn = Gtk.Button(label="Grab code")
     grab_btn.connect("clicked", lambda *_: grab_current())
     col.append(grab_btn)
     win.set_child(col)
-
-    def grab_current():
-        uri = web.get_uri() or ""
-        if store == "gog":
-            code = _query_param(uri, "code")
-            if code:
-                finish(code)
-            else:
-                hint.set_text("No code in the address yet — finish signing in first.")
-        else:
-            grab_epic_now()
 
     def on_decide(_view, decision, decision_type):
         if decision_type != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
@@ -901,23 +888,14 @@ def cmd_login_window(args):
             uri = decision.get_navigation_action().get_request().get_uri() or ""
         except Exception:
             return False
-        if store == "gog" and "on_login_success" in uri:
-            code = _query_param(uri, "code")
-            if code:
-                decision.ignore()
-                finish(code)
-                return True
+        code = code_in_uri(uri)
+        if code:
+            decision.ignore()
+            finish(code)
+            return True
         return False
 
     web.connect("decide-policy", on_decide)
-
-    def on_load(_view, event):
-        if store == "epic" and event == WebKit2.LoadEvent.FINISHED:
-            uri = web.get_uri() or ""
-            if "id/api/redirect" in uri:
-                grab_epic_now()
-
-    web.connect("load-changed", on_load)
     web.load_uri(_login_window_url(store))
     win.present()
     try:

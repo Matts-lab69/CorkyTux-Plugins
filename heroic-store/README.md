@@ -32,7 +32,9 @@ The plugin downloads its own `legendary` / `gogdl` to:
 ### Epic Games (embedded login)
 
 1. On the **Epic** tab press log in.
-2. An embedded WebKit window opens with the Epic website.
+2. An embedded WebKit window opens with the Epic website (needs PyGObject
+   WebKitGTK 6.0 for GTK4 — e.g. `net-libs/webkit-gtk:6` on Gentoo; if it
+   fails, paste the code manually below).
 3. Log in normally (Epic username/password/2FA).
 4. The plugin **auto-captures** the authorization code — nothing to copy.
 5. You'll see your avatar + name in the header. To leave: logout.
