@@ -1,6 +1,6 @@
 {
   "name": "Dependency Installer",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "entry": "dependency-installer",
   "description": "Smart dependency detection: scans game executables for DLL imports, checks what Wine/Proton provides, and only recommends deps that are truly needed. 63 dependencies supported.",
   "capabilities": ["scan", "install"],
