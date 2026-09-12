@@ -6,8 +6,12 @@
 
 <p align="center">
   <strong>Official plugins for CorkyTux Launcher</strong><br>
-  Minecraft, Epic/GOG stores, AppImages, RPG Maker runtimes, dependencies, DLL overrides and emulators for CorkyTux v3 (Rust).
+  Multi funciones para preservar videojuegos: Minecraft, tiendas Epic/GOG,
+  AppImages, RPG Maker, dependencias, DLLs y emuladores (CorkyTux v3).
 </p>
+
+> **Alpha** — plugins en desarrollo activo. Cualquier error, menciónalo en
+> [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
 
 <p align="center">
   <a href="#available-plugins">Plugins</a> •
@@ -28,6 +32,13 @@
 ## What is this?
 
 CorkyTux Plugins is a collection of **official plugins** that extend the capabilities of the [CorkyTux Launcher](https://github.com/Matts-lab69/CorkyTux-Launcher). Each plugin is a standalone executable that integrates with CorkyTux via a simple JSON protocol.
+
+## Guías
+
+- [Tienda Epic y GOG — cómo iniciar sesión y usarla](heroic-store/README.md)
+- [Minecraft — cuentas, Java, instancias y mods](minecraft-launcher/README.md)
+- [RPG Maker — scan, diagnose y run](rpgmaker-runtime/README.md)
+- [AppImage — scan, integrate y run](appimage-launcher/README.md)
 
 ---
 
@@ -330,6 +341,17 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - **Shader manager** — Apply custom shaders to games
 - **Audio configurator** — Set up audio devices per game
 - **Performance monitor** — Real-time FPS and resource usage
+
+---
+
+## Credits
+
+- [@Cristioro](https://github.com/Cristioro) — ideas para la UI y sugerencias
+  para hacer más eficiente el código.
+- [christvh / box-rpg](https://gitlab.com/christvh/box-rpg) — usé la lógica de
+  este repositorio para adaptarla a una UI (runtime RPG Maker).
+- [@ZzEdovec](https://github.com/ZzEdovec) — en algunas interfaces o iconos
+  usé o me basé en los repositorios de esta persona.
 
 ---
 
