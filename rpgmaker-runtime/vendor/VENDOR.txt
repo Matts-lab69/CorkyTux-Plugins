@@ -1,3 +1,3 @@
-1ea1401b61e571132060811a2e6dcb997f3ea6db 2026-09-12 feat(launch): NW.js fullscreen via session manifest (v26.9.20, full tree).
-X11 consent (new box requires TTY confirmation) is auto-answered by our
-PTY feeder in the wrapper (user opt-in); games still run under bwrap.
+ab58982d53ca1401a97759aa52f8916bf763f4ae 2026-09-12 feat(launch): explicit --x11 consent flag (v26.9.21, full tree).
+Wrapper passes --x11 on X11 sessions (= recorded user consent, no prompt);
+games still run isolated under bwrap either way.

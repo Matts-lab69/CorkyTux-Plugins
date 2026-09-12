@@ -408,46 +408,21 @@ def cmd_install(args):
     emit({"ok": True, "type": "done", "kind": kind, "installed_version": version})
 
 
-# Detached PTY feeder: answers the X11 consent prompt on the user's behalf.
-# New box-rpg requires interactive TTY confirmation for X11 sessions and
-# refuses pipes (isatty() check), but the launcher has no terminal. The
-# feeder owns a PTY, pre-feeds "y" (auto-consent recorded here, in the open,
-# per the user's explicit choice), then lingers detached until the game
-# exits. The game itself still runs sandboxed by box-rpg + Bubblewrap.
-_FEEDER = (
-    "import os, pty, subprocess, sys, time\n"
-    "cmd = sys.argv[1:]\n"
-    "master, slave = pty.openpty()\n"
-    "p = subprocess.Popen(cmd, stdin=slave, stdout=subprocess.DEVNULL,\n"
-    "                     stderr=subprocess.DEVNULL, start_new_session=True,\n"
-    "                     close_fds=True)\n"
-    "os.close(slave)\n"
-    "try:\n"
-    "    os.write(master, b'y\\n')\n"
-    "except OSError:\n"
-    "    pass\n"
-    "end = time.time() + 180\n"
-    "while time.time() < end:\n"
-    "    if p.poll() is not None:\n"
-    "        break\n"
-    "    time.sleep(5)\n"
-    "try:\n"
-    "    os.close(master)\n"
-    "except OSError:\n"
-    "    pass\n"
-)
+def _needs_x11() -> bool:
+    """True when the session is X11 (no owned Wayland socket).
 
-
-def spawn_launch_pty(launch_cmd: list, env: dict) -> None:
-    """Spawn box-rpg launch detached behind the consent feeder."""
-    subprocess.Popen(
-        [sys.executable, "-c", _FEEDER, *launch_cmd],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        env=env,
-    )
+    Upstream box-rpg >= 26.9.21 accepts an explicit per-run `--x11` flag
+    as the X11 consent (no prompt), mirroring --allow-network. On Wayland
+    the native path is used instead.
+    """
+    if not os.environ.get("DISPLAY"):
+        return False
+    way = os.environ.get("WAYLAND_DISPLAY")
+    if way:
+        rt = os.environ.get("XDG_RUNTIME_DIR", "")
+        if rt and os.path.exists(os.path.join(rt, way)):
+            return False
+    return True
 
 
 def cmd_run(args):
@@ -489,8 +464,18 @@ def cmd_run(args):
             root_files.append(args[i + 1])
     for f in root_files:
         launch_cmd += ["--copy-root-file", f]
+    # Explicit X11 consent for X11 sessions (upstream 26.9.21+ flag).
+    if _needs_x11() and "--x11" not in launch_cmd:
+        launch_cmd.append("--x11")
     try:
-        spawn_launch_pty(launch_cmd, box_env())
+        subprocess.Popen(
+            launch_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=box_env(),
+        )
     except OSError as e:
         fail(f"failed to spawn box-rpg launch: {e}", exit_code=3)
 

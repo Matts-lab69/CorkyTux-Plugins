@@ -21,15 +21,15 @@ The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
 ./rpgmaker-runtime cleanup list profiles   # what box-rpg accumulated
 ```
 
-## Sandbox & display notes (box-rpg 26.9.20)
+## Sandbox & display notes (box-rpg 26.9.21)
 
 - Games run isolated under Bubblewrap: game assets are read-only, only saves,
   the profile and temp storage are writable. Network is **denied** unless you
   pass `run --allow-network`; self-updating games need `--allow-game-writes`
   (only for games you trust).
-- On **X11** sessions box-rpg demands an interactive TTY confirmation (X11
-  clients can keylog). The plugin auto-answers it through a PTY — your
-  explicit choice when installing this plugin. On Wayland no prompt exists.
+- On **X11** sessions the plugin passes upstream's explicit `--x11` flag
+  (per-run consent, no prompt — your choice when installing this plugin;
+  X11 clients can keylog). On Wayland the native path is used.
 - Some NW.js exports need files from the game root: `run --copy-root-file
   game_messages.csv` (repeatable, files only — no dirs/symlinks).
 
