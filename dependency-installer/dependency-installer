@@ -752,13 +752,18 @@ def install_deps(prefix, deps, proton_path=None):
         env = os.environ.copy()
         env["WINEPREFIX"] = prefix
         env["WINETRICKS_GUI"] = "0"
-        env["DISPLAY"] = ""
+        # Wine/winetricks need a display (prefix creation and many verbs
+        # fail headless): inherit it, else wrap with xvfb-run when present.
+        cmd = [winetricks, "-q", dep_def["verb"]]
+        if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+            if shutil.which("xvfb-run"):
+                cmd = ["xvfb-run", "-a"] + cmd
         if wine:
             env["WINE"] = wine
 
         try:
             proc = subprocess.run(
-                [winetricks, "-q", dep_def["verb"]],
+                cmd,
                 env=env, capture_output=True, text=True, timeout=300,
             )
             ok = proc.returncode == 0
