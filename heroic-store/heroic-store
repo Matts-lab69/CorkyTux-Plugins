@@ -1009,12 +1009,13 @@ def _epic_price(el):
     return disc, orig, total.get("currencyCode") or ""
 
 
-def _epic_sale_search(count=120):
-    """Full on-sale catalog via the public store GraphQL (the weekly
-    freeGamesPromotions feed only carries ~12 items). The API caps pages
-    at 40, so paginate."""
+def _epic_sale_search(count=40, start=0):
+    """One on-sale catalog page via the public store GraphQL (the weekly
+    freeGamesPromotions feed only carries ~12 items). Returns (elements,
+    catalog_total). The API caps pages at 40."""
     import urllib.request
-    fields = """elements {
+    fields = """paging { total }
+      elements {
         title description urlSlug productSlug
         catalogNs { mappings { pageSlug pageType } }
         keyImages { type url }
@@ -1027,9 +1028,7 @@ def _epic_sale_search(count=120):
       }"""
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
                "Content-Type": "application/json", "Accept": "application/json"}
-    out, start, want = [], 0, max(1, min(120, count))
-    while len(out) < want:
-        query = """query {
+    query = """query {
   Catalog {
     searchStore(category: "games", count: %d, country: "US", keywords: "",
                 locale: "en-US", onSale: true, sortBy: "relevancy",
@@ -1037,17 +1036,13 @@ def _epic_sale_search(count=120):
       %s
     }
   }
-}""" % (min(40, want - len(out)), start, fields)
-        body = json.dumps({"query": query}).encode()
-        req = urllib.request.Request("https://store.epicgames.com/graphql", data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-        els = (((data.get("data") or {}).get("Catalog") or {}).get("searchStore") or {}).get("elements") or []
-        if not els:
-            break
-        out.extend(els)
-        start += len(els)
-    return out
+}""" % (max(1, min(40, count)), max(0, start), fields)
+    body = json.dumps({"query": query}).encode()
+    req = urllib.request.Request("https://store.epicgames.com/graphql", data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode())
+    store = (((data.get("data") or {}).get("Catalog") or {}).get("searchStore") or {})
+    return (store.get("elements") or [], (store.get("paging") or {}).get("total") or 0)
 
 
 def _epic_price_pct(el) -> int:
@@ -1061,35 +1056,47 @@ def _epic_price_pct(el) -> int:
     return 0
 
 
-def cmd_epic_deals(_args):
+def _epic_sale_page(start=0, count=40):
+    """One catalog page + catalog total (UI paginates with --start)."""
+    els, total = _epic_sale_search(count, start)
+    return els, total
+
+
+def cmd_epic_deals(args):
     import datetime as _dt
+    start = max(0, int(getattr(args, "start", 0) or 0))
+    count = max(1, min(40, int(getattr(args, "count", 0) or 40)))
     now = _dt.datetime.now(_dt.timezone.utc)
     out, seen, seen_urls = [], set(), set()
+    total, fetched = 0, 0
+    if start == 0:
+        # Verified promo-window deals first (with end dates).
+        # pct >= 100 is a free promo, not a deal (lives in Free games now).
+        try:
+            elements = _epic_catalog()
+        except Exception:
+            elements = []
+        for el in elements:
+            active, pct, end = _epic_offer_summary(el, now)
+            if not active or pct <= 0 or pct >= 100:
+                continue
+            title = el.get("title", "")
+            seen.add(title.casefold())
+            disc, orig, _cur = _epic_price(el)
+            out.append({"title": title,
+                        "description": el.get("description", ""),
+                        "cover": _epic_catalog_cover(el),
+                        "discount": pct,
+                        "price": disc, "base_price": orig,
+                        "ends": end,
+                        "store_url": _epic_slug_url(el)})
+    # Catalog page (the full on-sale catalog, summer sale & co).
     try:
-        elements = _epic_catalog()
-    except Exception:
-        elements = []
-    # 1) Verified promo-window deals first (with end dates).
-    # pct >= 100 is a free promo, not a deal (lives in Free games now).
-    for el in elements:
-        active, pct, end = _epic_offer_summary(el, now)
-        if not active or pct <= 0 or pct >= 100:
-            continue
-        title = el.get("title", "")
-        seen.add(title.casefold())
-        disc, orig, _cur = _epic_price(el)
-        out.append({"title": title,
-                    "description": el.get("description", ""),
-                    "cover": _epic_catalog_cover(el),
-                    "discount": pct,
-                    "price": disc, "base_price": orig,
-                    "ends": end,
-                    "store_url": _epic_slug_url(el)})
-    # 2) Fill up with the full on-sale catalog (summer sale & co).
-    try:
-        extra = _epic_sale_search(120)
-    except Exception:
-        extra = []
+        extra, total = _epic_sale_page(start, count)
+    except Exception as e:
+        if start == 0 and not out:
+            die(3, f"Could not fetch Epic offers: {e}")
+        extra, total = [], 0
     for el in extra:
         title = el.get("title", "") or ""
         if not title or title.casefold() in seen:
@@ -1113,12 +1120,12 @@ def cmd_epic_deals(_args):
                     "price": disc, "base_price": orig,
                     "ends": end,
                     "store_url": url})
-        if len(out) >= 120:
-            break
+    fetched = len(extra)
     out.sort(key=lambda x: -(x["discount"] or 0))
-    if not out:
+    if not out and start == 0:
         die(3, "Could not fetch Epic offers")
-    emit({"type": "done", "ok": True, "store": "epic", "deals": out})
+    emit({"type": "done", "ok": True, "store": "epic", "deals": out,
+          "total": total, "next": start + fetched})
 
 
 def cmd_gog_store_search(args):
@@ -1327,7 +1334,9 @@ def main():
     sub.add_parser("eos-code")
     sub.add_parser("umu-status")
     sub.add_parser("umu-setup")
-    sub.add_parser("epic-deals")
+    p_deals = sub.add_parser("epic-deals")
+    p_deals.add_argument("--start", type=int, default=0)
+    p_deals.add_argument("--count", type=int, default=40)
     args = parser.parse_args()
     dispatch = {
         "status": cmd_status,
