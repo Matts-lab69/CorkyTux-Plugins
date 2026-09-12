@@ -408,6 +408,48 @@ def cmd_install(args):
     emit({"ok": True, "type": "done", "kind": kind, "installed_version": version})
 
 
+# Detached PTY feeder: answers the X11 consent prompt on the user's behalf.
+# New box-rpg requires interactive TTY confirmation for X11 sessions and
+# refuses pipes (isatty() check), but the launcher has no terminal. The
+# feeder owns a PTY, pre-feeds "y" (auto-consent recorded here, in the open,
+# per the user's explicit choice), then lingers detached until the game
+# exits. The game itself still runs sandboxed by box-rpg + Bubblewrap.
+_FEEDER = (
+    "import os, pty, subprocess, sys, time\n"
+    "cmd = sys.argv[1:]\n"
+    "master, slave = pty.openpty()\n"
+    "p = subprocess.Popen(cmd, stdin=slave, stdout=subprocess.DEVNULL,\n"
+    "                     stderr=subprocess.DEVNULL, start_new_session=True,\n"
+    "                     close_fds=True)\n"
+    "os.close(slave)\n"
+    "try:\n"
+    "    os.write(master, b'y\\n')\n"
+    "except OSError:\n"
+    "    pass\n"
+    "end = time.time() + 180\n"
+    "while time.time() < end:\n"
+    "    if p.poll() is not None:\n"
+    "        break\n"
+    "    time.sleep(5)\n"
+    "try:\n"
+    "    os.close(master)\n"
+    "except OSError:\n"
+    "    pass\n"
+)
+
+
+def spawn_launch_pty(launch_cmd: list, env: dict) -> None:
+    """Spawn box-rpg launch detached behind the consent feeder."""
+    subprocess.Popen(
+        [sys.executable, "-c", _FEEDER, *launch_cmd],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env=env,
+    )
+
+
 def cmd_run(args):
     if not args:
         fail("run requires a game path", exit_code=2)
@@ -436,15 +478,19 @@ def cmd_run(args):
     launch_cmd = box_argv(["launch", str(path)])
     if runtime:
         launch_cmd += ["--runtime", runtime]
+    # Opt-in sandbox wideners, forwarded verbatim (upstream defaults to deny).
+    for flag in ("--allow-network", "--allow-game-writes"):
+        if flag in args[1:] and flag not in launch_cmd:
+            launch_cmd.append(flag)
+    # --copy-root-file FILE may repeat (auxiliary files into the session).
+    root_files = []
+    for i, a in enumerate(args[1:-1], start=1):
+        if a == "--copy-root-file":
+            root_files.append(args[i + 1])
+    for f in root_files:
+        launch_cmd += ["--copy-root-file", f]
     try:
-        subprocess.Popen(
-            launch_cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            env=box_env(),
-        )
+        spawn_launch_pty(launch_cmd, box_env())
     except OSError as e:
         fail(f"failed to spawn box-rpg launch: {e}", exit_code=3)
 

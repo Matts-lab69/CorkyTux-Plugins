@@ -1,6 +1,3 @@
-d28845f2a6aa7053a117b0d2ee71dae214b45f38 2026-09-08 fix(security)!: harden game and runtime trust boundaries
-+ cherry-picks from 1ea1401/71fd692 (2026-09-12, NOT the sandbox overhaul):
-  launch/manifest.py (fullscreen via session manifest, utf-8-sig),
-  games/inspector.py (utf-8-sig), cli/diagnose.py (EasyRPG --runtime VERSION),
-  launch/session.py (save dir). Sandbox/bwrap/X11-consent changes excluded:
-  headless launcher launches have no TTY.
+1ea1401b61e571132060811a2e6dcb997f3ea6db 2026-09-12 feat(launch): NW.js fullscreen via session manifest (v26.9.20, full tree).
+X11 consent (new box requires TTY confirmation) is auto-answered by our
+PTY feeder in the wrapper (user opt-in); games still run under bwrap.

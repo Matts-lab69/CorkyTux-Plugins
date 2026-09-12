@@ -1,6 +1,6 @@
 {
   "name": "RPG Maker Runtime",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "entry": "rpgmaker-runtime",
   "type": "RpgMaker",
   "description": "Run RPG Maker MV/MZ (NW.js) and 2000/2003 (EasyRPG) games via box-rpg: scan, diagnose, runtimes, launch.",

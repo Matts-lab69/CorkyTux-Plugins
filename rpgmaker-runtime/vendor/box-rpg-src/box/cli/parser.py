@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     nwjs_commands.add_parser("list", help=_("list installed NW.js runtimes"))
     available = nwjs_commands.add_parser("available", help=_("list online NW.js versions"))
     available.add_argument(
-        "--page", type=int, default=1, help=_("online version page (five versions)")
+        "--page", type=int, default=1, help=_("online version page (ten versions)")
     )
     available.add_argument(
         "--interactive", action="store_true", help=_("select and install a version")
@@ -97,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("game", nargs="?", default=".", type=str)
     launch.add_argument("--runtime", dest="runtime_version")
     launch.add_argument("--sdk", action="store_true", help=_("use the NW.js SDK build"))
+    launch.add_argument(
+        "--allow-network",
+        action="store_true",
+        help=_("allow host network access for this launch only (including local services)"),
+    )
+    launch.add_argument(
+        "--allow-game-writes",
+        action="store_true",
+        help=_("allow game directory writes for this launch only"),
+    )
     launch.add_argument(
         "--copy-root-file",
         action="append",
