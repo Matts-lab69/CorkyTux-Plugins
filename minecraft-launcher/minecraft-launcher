@@ -1,0 +1,2469 @@
+#!/usr/bin/env python3
+"""
+CorkyTux Minecraft Launcher plugin.
+
+Protocol: JSON Lines on stdout. One JSON object per line, streamed as
+events happen (progress, done, error). Mirrors the pattern used by
+dependency-installer / dll-overrides-automator, extended for streaming.
+
+Auth flow: standard Microsoft Identity Platform "device code" grant
+(publicly documented OAuth2 flow, RFC 8628) followed by the public
+Xbox Live -> XSTS -> Minecraft Services token exchange documented at
+https://wiki.vg/Microsoft_Authentication_Scheme. This is Microsoft's/
+Mojang's own public API surface, independent of any specific launcher
+codebase.
+
+Download/install/launch: delegated to `minecraft-launcher-lib` (MIT
+licensed, PyPI: minecraft-launcher-lib), which implements the public
+Mojang piston-meta manifest format.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import uuid as uuidlib
+from pathlib import Path
+
+import requests
+
+try:
+    import minecraft_launcher_lib as mll
+except ImportError:
+    mll = None
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+# --- Config -----------------------------------------------------------
+
+CONFIG_DIR = Path.home() / ".config" / "CorkyTux" / "plugins" / "minecraft-launcher"
+ACCOUNTS_FILE = CONFIG_DIR / "accounts.json"
+MC_DIR = CONFIG_DIR / "instances"
+LOCKS_DIR = CONFIG_DIR / "locks"
+JAVA_DIR = CONFIG_DIR / "java"
+JAVA_JSON = CONFIG_DIR / "java.json"
+
+JAVA_VERSIONS = ["8", "17", "21", "25"]
+
+LOGS_DIR = Path.home() / ".local" / "share" / "CorkyTux" / "logs"
+
+
+def _mc_parts(mc_version: str):
+    m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", (mc_version or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+
+
+def _mc_of_version_id(version_id: str) -> str:
+    vid = (version_id or "").strip()
+    m = re.match(r"(\d+\.\d+(?:\.\d+)?)-", vid)
+    if m:
+        return m.group(1)
+    m = re.search(r"-(\d+\.\d+(?:\.\d+)?)$", vid)
+    if m:
+        return m.group(1)
+    return vid
+
+
+def manifest_java_required(mc_dir: Path, version_id: str):
+    """Read javaVersion.majorVersion following inheritsFrom (PineconeMC-style:
+    the version json, not a heuristic, decides the JVM)."""
+    seen = set()
+    cur = version_id
+    for _ in range(4):
+        if not cur or cur in seen:
+            break
+        seen.add(cur)
+        jf = mc_dir / "versions" / cur / f"{cur}.json"
+        try:
+            doc = json.loads(jf.read_text())
+        except (OSError, ValueError):
+            break
+        jv = doc.get("javaVersion") or {}
+        if isinstance(jv.get("majorVersion"), int):
+            return jv["majorVersion"]
+        nxt = doc.get("inheritsFrom") or ""
+        cur = nxt if nxt != version_id else ""
+    return None
+
+
+def required_java_major(mc_version: str) -> int:
+    parts = _mc_parts(mc_version)
+    if not parts:
+        return 21
+    major, minor, _patch = parts
+    if major != 1:
+        return 21
+    if minor < 17:
+        return 8
+    if minor <= 20:
+        return 17
+    return 21
+
+
+def max_java_major(mc_version: str) -> int:
+    parts = _mc_parts(mc_version)
+    if not parts:
+        return 99
+    major, minor, _patch = parts
+    if major == 1 and minor <= 16:
+        return 17
+    return 99
+
+
+def _java_major_of(version_str: str) -> int:
+    s = (version_str or "").strip()
+    m = re.match(r"1\.(\d+)", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return 0
+    m = re.match(r"(\d+)", s)
+    try:
+        return int(m.group(1)) if m else 0
+    except ValueError:
+        return 0
+
+ADOPTIUM_API = ("https://api.adoptium.net/v3/binary/latest/{ver}/ga"
+                "/linux/x64/jre/hotspot/normal/eclipse")
+
+# Minimum free RAM (MB) required on top of the JVM heap the user requests,
+# so we don't launch straight into an OOM. Conservative default.
+MIN_FREE_RAM_MARGIN_MB = 512
+
+# You must register your own Azure AD application to get a client_id:
+# https://portal.azure.com -> App registrations -> New registration
+# Redirect URI type: "Mobile and desktop applications", enable public
+# client flows. This is a one-time setup step for the launcher author,
+# not something scraped from another project.
+# Overridable at runtime via ~/.config/CorkyTux/plugins/minecraft-launcher/azure.json
+# {"client_id": "..."} so the UI can save it without editing this file.
+CLIENT_ID = "REPLACE_WITH_YOUR_AZURE_APP_CLIENT_ID"
+AZURE_JSON = CONFIG_DIR / "azure.json"
+
+
+def effective_client_id() -> str:
+    try:
+        data = json.loads(AZURE_JSON.read_text())
+        cid = str(data.get("client_id", "")).strip()
+        if cid:
+            return cid
+    except (OSError, ValueError):
+        pass
+    return CLIENT_ID
+
+DEVICE_CODE_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
+TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+XBL_AUTH_URL = "https://user.auth.xboxlive.com/user/authenticate"
+XSTS_AUTH_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
+MC_LOGIN_URL = "https://api.minecraftservices.com/authentication/login_with_xbox"
+MC_PROFILE_URL = "https://api.minecraftservices.com/minecraft/profile"
+
+
+# --- JSON Lines helper --------------------------------------------------
+
+def emit(event: dict):
+    print(json.dumps(event), flush=True)
+
+
+def die(code: int, message: str):
+    emit({"type": "error", "message": message})
+    sys.exit(code)
+
+
+# --- Auth (device code flow) --------------------------------------------
+
+def cmd_auth(args):
+    client_id = effective_client_id()
+    if client_id.startswith("REPLACE_WITH") or not client_id.strip():
+        die(4, "CLIENT_ID not configured. Register an Azure app (portal.azure.com -> App "
+               "registrations, Mobile+desktop, public client flows) and save it with: "
+               "auth-config --client-id <id>.")
+
+    resp = requests.post(DEVICE_CODE_URL, data={
+        "client_id": client_id,
+        "scope": "XboxLive.signin offline_access",
+    })
+    resp.raise_for_status()
+    data = resp.json()
+
+    emit({
+        "type": "device_code",
+        "user_code": data["user_code"],
+        "verification_uri": data["verification_uri"],
+        "expires_in": data["expires_in"],
+    })
+
+    interval = data.get("interval", 5)
+    device_code = data["device_code"]
+    expires_at = time.time() + data["expires_in"]
+
+    ms_token = None
+    while time.time() < expires_at:
+        time.sleep(interval)
+        poll = requests.post(TOKEN_URL, data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "client_id": client_id,
+            "device_code": device_code,
+        })
+        payload = poll.json()
+        if poll.status_code == 200:
+            ms_token = payload["access_token"]
+            break
+        if payload.get("error") not in ("authorization_pending", "slow_down"):
+            die(4, f"MS auth failed: {payload.get('error')}")
+
+    if not ms_token:
+        die(4, "Device code expired before user authorized")
+
+    emit({"type": "progress", "stage": "xbox_live_auth", "percent": 40})
+    xbl = requests.post(XBL_AUTH_URL, json={
+        "Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com",
+                        "RpsTicket": f"d={ms_token}"},
+        "RelyingParty": "http://auth.xboxlive.com",
+        "TokenType": "JWT",
+    }).json()
+    xbl_token = xbl["Token"]
+    uhs = xbl["DisplayClaims"]["xui"][0]["uhs"]
+
+    emit({"type": "progress", "stage": "xsts_auth", "percent": 60})
+    xsts = requests.post(XSTS_AUTH_URL, json={
+        "Properties": {"SandboxId": "RETAIL", "UserTokens": [xbl_token]},
+        "RelyingParty": "rp://api.minecraftservices.com/",
+        "TokenType": "JWT",
+    }).json()
+    xsts_token = xsts["Token"]
+
+    emit({"type": "progress", "stage": "minecraft_login", "percent": 80})
+    mc_login = requests.post(MC_LOGIN_URL, json={
+        "identityToken": f"XBL3.0 x={uhs};{xsts_token}"
+    }).json()
+    mc_access_token = mc_login["access_token"]
+
+    profile = requests.get(MC_PROFILE_URL, headers={
+        "Authorization": f"Bearer {mc_access_token}"
+    }).json()
+
+    if "id" not in profile:
+        die(4, "Account has no Minecraft profile (game not owned / not migrated)")
+
+    account = {
+        "id": profile["id"],
+        "name": profile["name"],
+        "access_token": mc_access_token,
+    }
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    accounts = json.loads(ACCOUNTS_FILE.read_text()) if ACCOUNTS_FILE.exists() else []
+    accounts = [a for a in accounts if a["id"] != account["id"]] + [account]
+    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+
+    emit({"type": "done", "ok": True, "account_id": account["id"], "username": account["name"]})
+
+
+# --- Versions / install / launch (minecraft-launcher-lib) ---------------
+
+def _require_mll():
+    if mll is None:
+        die(2, "minecraft-launcher-lib not installed (pip install minecraft-launcher-lib)")
+
+
+def cmd_versions(args):
+    _require_mll()
+    versions = mll.utils.get_version_list()
+    if not args.all:
+        versions = [v for v in versions if v["type"] == "release"]
+    emit({"type": "done", "ok": True, "versions": [
+        {"id": v["id"], "type": v["type"], "releaseTime": str(v["releaseTime"])} for v in versions
+    ]})
+
+
+LOADERS = ["fabric", "forge", "neoforge", "quilt"]
+
+
+def _install_callbacks():
+    state = {"max": 1}
+
+    def set_status(status):
+        emit({"type": "progress", "stage": status, "percent": None})
+
+    def set_progress(value):
+        emit({"type": "progress", "stage": "downloading",
+              "percent": _pct(value, state["max"])})
+
+    def set_max(value):
+        state["max"] = value
+
+    return {"setStatus": set_status, "setProgress": set_progress,
+            "setMax": set_max}
+
+
+
+
+def _mc_dir(args) -> Path:
+    custom = (getattr(args, "mc_dir", "") or "").strip()
+    if custom:
+        d = Path(custom).expanduser()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    return MC_DIR
+
+def cmd_install(args):
+    _require_mll()
+    mc_dir = _mc_dir(args)
+    loader = (getattr(args, "loader", "") or "").strip().lower()
+    loader_version = (getattr(args, "loader_version", "") or "").strip() or None
+
+    if loader and loader != "vanilla":
+        if loader not in LOADERS:
+            die(2, f"loader must be one of vanilla/{'/'.join(LOADERS)}")
+        try:
+            ml = mll.mod_loader.get_mod_loader(loader)
+        except ValueError:
+            die(2, f"loader not supported by minecraft-launcher-lib: {loader}")
+        if not ml.is_minecraft_version_supported(args.version):
+            die(2, f"{loader} does not support Minecraft {args.version}")
+        if not loader_version:
+            try:
+                loader_version = ml.get_latest_loader_version(args.version)
+            except Exception as e:
+                die(3, f"Could not resolve {loader} version: {e}")
+        emit({"type": "progress", "stage": f"installing-{loader}-{loader_version}",
+              "percent": None})
+        try:
+            installed_id = ml.install(args.version, str(mc_dir),
+                                      loader_version=loader_version,
+                                      callback=_install_callbacks())
+        except Exception as e:
+            die(3, f"Install failed: {e}")
+        emit({"type": "done", "ok": True, "version": installed_id,
+              "mc_version": args.version, "loader": loader,
+              "loader_version": loader_version})
+        return
+
+    try:
+        mll.install.install_minecraft_version(
+            version=args.version,
+            minecraft_directory=str(mc_dir),
+            callback=_install_callbacks(),
+        )
+    except Exception as e:
+        die(3, f"Install failed: {e}")
+
+    emit({"type": "done", "ok": True, "version": args.version})
+
+
+def cmd_loader_versions(args):
+    _require_mll()
+    loader = (args.loader or "").strip().lower()
+    if loader not in LOADERS:
+        die(2, f"loader must be one of {LOADERS}")
+    try:
+        ml = mll.mod_loader.get_mod_loader(loader)
+    except ValueError:
+        die(2, f"loader not supported: {loader}")
+    if not ml.is_minecraft_version_supported(args.mc_version):
+        emit({"type": "done", "ok": True, "loader": loader,
+              "mc_version": args.mc_version, "versions": [],
+              "supported": False})
+        return
+    try:
+        versions = ml.get_loader_versions(args.mc_version, True)
+        latest = ml.get_latest_loader_version(args.mc_version)
+    except Exception as e:
+        die(3, f"Could not list {loader} versions: {e}")
+    emit({"type": "done", "ok": True, "loader": loader,
+          "mc_version": args.mc_version, "versions": versions,
+          "latest": latest, "supported": True})
+
+
+def _pct(value, maximum):
+    if not maximum:
+        return 0
+    return min(100, int(value * 100 / maximum))
+
+
+def _check_available_memory(requested_heap_mb: int):
+    """Refuse to launch if free RAM can't cover the requested JVM heap
+    plus a safety margin. Returns (ok, available_mb)."""
+    if psutil is None:
+        # Can't check without psutil; don't block launch, just skip the check.
+        return True, None
+    available_mb = psutil.virtual_memory().available / (1024 * 1024)
+    needed_mb = requested_heap_mb + MIN_FREE_RAM_MARGIN_MB
+    return available_mb >= needed_mb, available_mb
+
+
+def _account_lock_path(account_id: str) -> Path:
+    return LOCKS_DIR / f"{account_id}.lock"
+
+
+def _acquire_account_lock(account_id: str) -> bool:
+    """Prevent launching the same account twice concurrently. Stale
+    locks (pointing to a pid that no longer exists) are cleared
+    automatically."""
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = _account_lock_path(account_id)
+
+    if lock_path.exists():
+        try:
+            held_pid = int(lock_path.read_text().strip())
+        except (ValueError, OSError):
+            held_pid = None
+
+        still_running = False
+        if held_pid is not None:
+            if psutil is not None:
+                still_running = psutil.pid_exists(held_pid)
+            else:
+                still_running = _pid_exists_fallback(held_pid)
+
+        if still_running:
+            return False
+        lock_path.unlink(missing_ok=True)
+
+    lock_path.write_text(str(os.getpid()))
+    return True
+
+
+def _pid_exists_fallback(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def cmd_launch(args):
+    _require_mll()
+    mc_dir = _mc_dir(args)
+    if not ACCOUNTS_FILE.exists():
+        die(4, "No accounts. Run 'auth' first.")
+
+    accounts = json.loads(ACCOUNTS_FILE.read_text())
+    account = next((a for a in accounts if a["id"] == args.account), None) if args.account else (accounts[0] if accounts else None)
+    if not account:
+        die(4, f"Account not found: {args.account}")
+
+    if not _acquire_account_lock(account["id"]):
+        die(4, f"Account {account['name']} is already running an instance")
+
+    ok, available_mb = _check_available_memory(args.max_memory_mb)
+    if not ok:
+        _account_lock_path(account["id"]).unlink(missing_ok=True)
+        die(3, f"Not enough free RAM: need ~{args.max_memory_mb + MIN_FREE_RAM_MARGIN_MB}MB, "
+               f"have {available_mb:.0f}MB available")
+    if available_mb is not None:
+        emit({"type": "progress", "stage": "memory_check", "percent": 100,
+              "available_mb": round(available_mb)})
+
+    jvm_args = [f"-Xmx{args.max_memory_mb}M"]
+    if args.min_memory_mb and args.min_memory_mb > 0:
+        jvm_args.append(f"-Xms{args.min_memory_mb}M")
+    for extra in (args.jvm_arg or []):
+        extra = (extra or "").strip()
+        if extra:
+            jvm_args.append(extra)
+    options = {
+        "username": account["name"],
+        "uuid": account["id"],
+        "token": account["access_token"],
+        "jvmArguments": jvm_args,
+    }
+    if args.resolution:
+        m = re.match(r"(\d+)x(\d+)", args.resolution.strip())
+        if m:
+            options["customResolution"] = True
+            options["resolutionWidth"] = m.group(1)
+            options["resolutionHeight"] = m.group(2)
+
+    mc_part = _mc_of_version_id(args.version)
+    required = manifest_java_required(mc_dir, args.version)
+    if not isinstance(required, int):
+        required = required_java_major(mc_part or args.version)
+    max_major = max_java_major(mc_part or args.version)
+    raw_java = (args.java or "").strip()
+    java_bin = ""
+    if raw_java and raw_java != "auto" and Path(raw_java).is_file():
+        if required <= _java_major_of(_java_version_of(raw_java)) <= max_major:
+            java_bin = raw_java
+    elif raw_java and raw_java != "auto":
+        pass
+    else:
+        sel = _read_java_json().get("selected", "")
+        if sel and Path(sel).is_file() and required <= _java_major_of(_java_version_of(sel)) <= max_major:
+            java_bin = sel
+        else:
+            auto = find_compatible_java(required, max_major)
+            if auto:
+                java_bin = auto["path"]
+    if not java_bin or not Path(java_bin).is_file():
+        _account_lock_path(account["id"]).unlink(missing_ok=True)
+        want = f"Java {required}+" if max_major >= 99 else f"Java {required}-{max_major}"
+        die(3, f"No compatible Java found for Minecraft {args.version} "
+               f"(needs {want}). Install it below "
+               f"or set a system Java — no download was started automatically.")
+    emit({"type": "progress", "stage": "java_select", "percent": 100,
+          "java": java_bin, "required_java": required})
+    launch_env = None
+    if java_bin and Path(java_bin).is_file():
+        java_dir = str(Path(java_bin).parent)
+        env = os.environ.copy()
+        env["PATH"] = java_dir + os.pathsep + env.get("PATH", "")
+        env["JAVA_HOME"] = str(Path(java_bin).parent.parent)
+        launch_env = env
+        options["executablePath"] = java_bin
+
+    try:
+        command = mll.command.get_minecraft_command(
+            version=args.version,
+            minecraft_directory=str(mc_dir),
+            options=options,
+        )
+    except TypeError:
+        options.pop("executablePath", None)
+        try:
+            command = mll.command.get_minecraft_command(
+                version=args.version,
+                minecraft_directory=str(mc_dir),
+                options=options,
+            )
+        except Exception as e:
+            _account_lock_path(account["id"]).unlink(missing_ok=True)
+            die(3, f"Could not build launch command: {e}")
+    except Exception as e:
+        _account_lock_path(account["id"]).unlink(missing_ok=True)
+        die(3, f"Could not build launch command: {e}")
+
+    if args.dry_run:
+        _account_lock_path(account["id"]).unlink(missing_ok=True)
+        emit({"type": "done", "ok": True, "dry_run": True,
+              "java": command[0] if command else "", "argv": command})
+        return
+
+    if args.pre_hook and args.pre_hook.strip():
+        emit({"type": "progress", "stage": "pre_hook", "percent": None})
+        hook = subprocess.run(args.pre_hook.strip(), shell=True, cwd=str(mc_dir),
+                              capture_output=True, text=True, timeout=300)
+        if hook.returncode != 0:
+            emit({"type": "progress", "stage": "pre_hook_failed", "percent": None})
+
+    import datetime as _dt
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_ver = re.sub(r"[^A-Za-z0-9._-]+", "_", args.version)
+    log_path = LOGS_DIR / f"Minecraft-{safe_ver}-{_dt.datetime.now():%Y%m%d-%H%M%S}.log"
+    try:
+        log_fh = open(log_path, "w")
+        log_fh.write(f"# CorkyTux Minecraft {args.version} as {account['name']} java={java_bin}\n")
+        log_fh.write(f"# cmd: {' '.join(command)}\n")
+        log_fh.flush()
+    except OSError as e:
+        _account_lock_path(account["id"]).unlink(missing_ok=True)
+        die(3, f"Cannot write log file: {e}")
+    if args.wrapper and args.wrapper.strip():
+        command = args.wrapper.strip().split() + command
+    proc = subprocess.Popen(command, cwd=str(mc_dir), env=launch_env,
+                             stdout=log_fh, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    # Lock now points at the actual game process, not this short-lived plugin.
+    _account_lock_path(account["id"]).write_text(str(proc.pid))
+    emit({"type": "done", "ok": True, "pid": proc.pid,
+          "log": str(log_path), "java": java_bin,
+          "required_java": required})
+
+
+def cmd_status(args):
+    installed = []
+    if mll is not None and MC_DIR.exists():
+        installed = [v["id"] for v in mll.utils.get_installed_versions(str(MC_DIR))]
+    accounts = []
+    if ACCOUNTS_FILE.exists():
+        accounts = [{"id": a["id"], "name": a["name"], "offline": a.get("offline", False),
+                     "ely": a.get("ely", False)}
+                    for a in json.loads(ACCOUNTS_FILE.read_text())]
+    mods_dir = MC_DIR / "mods"
+    mods_count = 0
+    if mods_dir.is_dir():
+        mods_count = sum(1 for p in mods_dir.iterdir()
+                         if p.is_file() and (p.suffix.lower() == ".jar"
+                                             or p.name.endswith(".jar.disabled")))
+    emit({"type": "done", "ok": True, "installed_versions": installed, "accounts": accounts,
+          "java": _java_state(), "deps": _deps_state(),
+          "azure_configured": not effective_client_id().startswith("REPLACE_WITH"),
+          "mods_count": mods_count, "mods_dir": str(mods_dir)})
+
+
+def _deps_state():
+    return {
+        "minecraft_launcher_lib": mll is not None,
+        "psutil": psutil is not None,
+        "requests": True,
+    }
+
+
+def _java_version_of(path: str):
+    # Cached per binary (mtime+size): spawning 11 JVMs on every detect
+    # costs ~1s + process churn; binaries almost never change version.
+    try:
+        st = os.stat(os.path.realpath(path))
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        return ""
+    try:
+        cached = (_read_java_json().get("versions") or {}).get(path)
+        if isinstance(cached, dict) and cached.get("sig") == sig and cached.get("version"):
+            return cached["version"]
+    except Exception:
+        pass
+    try:
+        proc = subprocess_run([path, "-version"], timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    out = (proc.stderr or "") + (proc.stdout or "")
+    m = re.search(r'version "([^"]+)"', out)
+    if m:
+        ver = m.group(1)
+    else:
+        m = re.search(r"(\d[\d._]+)", out)
+        ver = m.group(1) if m else ""
+    if ver:
+        try:
+            state = _read_java_json()
+            vers = state.get("versions")
+            if not isinstance(vers, dict):
+                vers = {}
+            vers[path] = {"sig": sig, "version": ver}
+            for k in [k for k in vers if not Path(k).exists()]:
+                del vers[k]
+            state["versions"] = vers
+            _write_java_json(state)
+        except Exception:
+            pass
+    return ver
+
+
+def subprocess_run(cmd, timeout):
+    import subprocess as sp
+    return sp.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                  timeout=timeout)
+
+
+def _read_java_json():
+    try:
+        return json.loads(JAVA_JSON.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_java_json(data: dict):
+    JAVA_DIR.mkdir(parents=True, exist_ok=True)
+    JAVA_JSON.write_text(json.dumps(data, indent=2))
+
+
+def _iter_java_candidates():
+    import shutil as _sh
+    seen = set()
+    ordered = []
+    for cand in ["/usr/bin/java", "/usr/local/bin/java"]:
+        if cand not in seen:
+            seen.add(cand)
+            ordered.append((cand, "system"))
+    jh = os.environ.get("JAVA_HOME", "")
+    if jh:
+        p = str(Path(jh) / "bin" / "java")
+        if p not in seen:
+            seen.add(p)
+            ordered.append((p, "JAVA_HOME"))
+    for jvm in sorted(Path("/usr/lib/jvm").glob("*/bin/java")):
+        if str(jvm) not in seen:
+            seen.add(str(jvm))
+            ordered.append((str(jvm), "jvm-dir"))
+    for jvm in sorted(Path("/usr/lib/jvm").glob("*/*/bin/java")):
+        if str(jvm) not in seen:
+            seen.add(str(jvm))
+            ordered.append((str(jvm), "jvm-dir-nested"))
+    for base in [Path.home() / "jdk", Path("/opt/jvm"), Path("/opt/java")]:
+        if base.is_dir():
+            for jvm in sorted(base.glob("*/bin/java")):
+                if str(jvm) not in seen:
+                    seen.add(str(jvm))
+                    ordered.append((str(jvm), "temurin-dir"))
+    for jb in sorted(Path("/opt").glob("*/bin/java")):
+        if str(jb) not in seen:
+            seen.add(str(jb))
+            ordered.append((str(jb), "opt-dir"))
+    try:
+        alt = subprocess_run(["update-alternatives", "--list", "java"], timeout=10)
+        for line in ((alt.stdout or "").splitlines()):
+            p = line.strip()
+            if p and p not in seen:
+                seen.add(p)
+                ordered.append((p, "alternatives"))
+    except Exception:
+        pass
+    for jb in sorted((Path.home() / ".minecraft" / "runtime").rglob("bin/java")):
+        if str(jb) not in seen:
+            seen.add(str(jb))
+            ordered.append((str(jb), "mojang-runtime"))
+    for jb in sorted(JAVA_DIR.glob("*/bin/java")) + sorted(JAVA_DIR.glob("*/*/bin/java")):
+        if str(jb) not in seen:
+            seen.add(str(jb))
+            ordered.append((str(jb), "corkytux-adoptium"))
+    which_java = _sh.which("java")
+    if which_java and which_java not in seen:
+        ordered.append((which_java, "PATH"))
+    state = _read_java_json()
+    for _ver, p in state.get("installs", {}).items():
+        if p not in seen:
+            seen.add(p)
+            ordered.append((p, "corkytux-adoptium"))
+    return ordered
+
+
+def find_compatible_java(required_major: int, max_major: int = 99):
+    best = None
+    best_major = None
+    for path, origin in _iter_java_candidates():
+        p = Path(path)
+        if not (p.is_file() and os.access(p, os.X_OK)):
+            continue
+        ver = _java_version_of(path)
+        major = _java_major_of(ver)
+        if major < required_major or major > max_major:
+            continue
+        if best is None or major < best_major:
+            best, best_major = {"path": path, "version": ver,
+                                "major": major, "origin": origin}, major
+    return best
+
+
+def cmd_java_detect(args):
+    found = []
+    seen = set()
+    seen_real = set()
+
+    def add(path: str, origin: str):
+        p = str(Path(path).expanduser())
+        if p in seen:
+            return
+        seen.add(p)
+        try:
+            rp = str(Path(p).resolve())
+        except OSError:
+            rp = p
+        if rp in seen_real:
+            return
+        seen_real.add(rp)
+        if Path(p).is_file() and os.access(p, os.X_OK):
+            ver = _java_version_of(p)
+            found.append({"path": p, "version": ver,
+                          "major": _java_major_of(ver), "origin": origin})
+
+    import shutil as _sh  # noqa
+    for cand in ["/usr/bin/java", "/usr/local/bin/java"]:
+        add(cand, "system")
+    jh = os.environ.get("JAVA_HOME", "")
+    if jh:
+        add(str(Path(jh) / "bin" / "java"), "JAVA_HOME")
+    for jvm in sorted(Path("/usr/lib/jvm").glob("*/bin/java")):
+        add(str(jvm), "jvm-dir")
+    for jvm in sorted(Path("/usr/lib/jvm").glob("*/*/bin/java")):
+        add(str(jvm), "jvm-dir-nested")
+    for base in [Path.home() / "jdk", Path("/opt/jvm"), Path("/opt/java")]:
+        if base.is_dir():
+            for jvm in sorted(base.glob("*/bin/java")):
+                add(str(jvm), "temurin-dir")
+    for jb in sorted(Path("/opt").glob("*/bin/java")):
+        add(str(jb), "opt-dir")
+    try:
+        alt = subprocess_run(["update-alternatives", "--list", "java"], timeout=10)
+        for line in ((alt.stdout or "").splitlines()):
+            p = line.strip()
+            if p:
+                add(p, "alternatives")
+    except Exception:
+        pass
+    for jb in sorted((Path.home() / ".minecraft" / "runtime").rglob("bin/java")):
+        add(str(jb), "mojang-runtime")
+    for jb in sorted(JAVA_DIR.glob("*/bin/java")) + sorted(JAVA_DIR.glob("*/*/bin/java")):
+        add(str(jb), "corkytux-adoptium")
+    which_java = _sh.which("java")
+    if which_java:
+        add(which_java, "PATH")
+
+    state = _read_java_json()
+    emit({"type": "done", "ok": True, "found": found,
+          "selected": state.get("selected", "")})
+
+
+def cmd_java_install(args):
+    import shutil as _sh
+    import subprocess as sp
+    import tarfile
+    import urllib.request
+
+    ver = args.version
+    if ver not in JAVA_VERSIONS:
+        die(2, f"version must be one of {JAVA_VERSIONS}")
+    dest = JAVA_DIR / ver
+    emit({"type": "progress", "stage": f"downloading-java-{ver}", "percent": 0})
+    url = ADOPTIUM_API.format(ver=ver)
+    tmp = JAVA_DIR / f".tmp-java-{ver}.tar.gz"
+    try:
+        JAVA_DIR.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+        downloaded = 0
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
+            total = int(resp.headers.get("Content-Length", 0))
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    emit({"type": "progress", "stage": f"downloading-java-{ver}",
+                          "percent": round(downloaded * 100 / total, 1)})
+        emit({"type": "progress", "stage": f"extracting-java-{ver}", "percent": None})
+        if dest.exists():
+            _sh.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tmp, "r:gz") as tf:
+            tf.extractall(dest)
+        tmp.unlink(missing_ok=True)
+    except Exception as e:
+        die(3, f"Java {ver} download failed: {e}")
+
+    cands = sorted(dest.glob("*/bin/java")) + sorted(dest.glob("bin/java"))
+    java_bin = str(cands[0]) if cands else ""
+    if not java_bin or not _java_version_of(java_bin):
+        die(3, f"Java {ver} extracted but bin/java is unusable")
+    try:
+        os.chmod(java_bin, 0o755)
+    except OSError:
+        pass
+    state = _read_java_json()
+    installs = state.get("installs", {})
+    installs[ver] = java_bin
+    state["installs"] = installs
+    if not state.get("selected"):
+        state["selected"] = java_bin
+    _write_java_json(state)
+    emit({"type": "done", "ok": True, "version": ver, "path": java_bin,
+          "java_version": _java_version_of(java_bin)})
+
+
+PISTON_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+
+
+def cmd_manifest_java(args):
+    want = (args.mc_version or "").strip()
+    import urllib.request
+    try:
+        req = urllib.request.Request(PISTON_MANIFEST, headers={"User-Agent": MODRINTH_UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            manifest = json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"Could not fetch version manifest: {e}")
+    url = next((v.get("url", "") for v in manifest.get("versions", []) if v.get("id") == want), "")
+    if not url:
+        die(2, f"Unknown Minecraft version: {want}")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            doc = json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"Could not fetch version json: {e}")
+    jv = doc.get("javaVersion") or {}
+    if not isinstance(jv.get("majorVersion"), int):
+        die(3, "Version has no javaVersion field")
+    emit({"type": "done", "ok": True, "mc_version": want,
+          "required_java": jv["majorVersion"]})
+
+
+def cmd_java_required(args):
+    ver = (args.version or "").strip()
+    mc_dir = _mc_dir(args)
+    manifest = manifest_java_required(mc_dir, ver)
+    mc_part = _mc_of_version_id(ver)
+    required = manifest if isinstance(manifest, int) else required_java_major(mc_part or ver)
+    maximum = max_java_major(mc_part or ver)
+    auto = find_compatible_java(required, maximum)
+    emit({"type": "done", "ok": True, "version": ver,
+          "required_java": required, "max_java": maximum,
+          "satisfied": auto is not None,
+          "candidate": auto or {}})
+
+
+def cmd_java_use(args):
+    p = str(Path(args.path).expanduser())
+    if not (Path(p).is_file() and os.access(p, os.X_OK)):
+        die(2, f"not executable: {p}")
+    state = _read_java_json()
+    state["selected"] = p
+    _write_java_json(state)
+    emit({"type": "done", "ok": True, "selected": p,
+          "java_version": _java_version_of(p)})
+
+
+def _java_state():
+    state = _read_java_json()
+    installs = state.get("installs", {})
+    live = {}
+    for ver, path in installs.items():
+        if Path(path).is_file():
+            live[ver] = {"path": path, "version": _java_version_of(path)}
+    return {"selected": state.get("selected", ""), "installs": live,
+            "supported": JAVA_VERSIONS}
+
+
+def _deps_state():
+    return {
+        "minecraft_launcher_lib": mll is not None,
+        "psutil": psutil is not None,
+        "requests": True,
+    }
+
+
+def cmd_setup(args):
+    """pip-install (user site) the runtime deps this plugin needs."""
+    import subprocess as sp
+    pkgs = []
+    if mll is None:
+        pkgs.append("minecraft-launcher-lib>=6.0")
+    if psutil is None:
+        pkgs.append("psutil>=5.9")
+    try:
+        import requests  # noqa
+    except ImportError:
+        pkgs.append("requests>=2.31")
+    if not pkgs:
+        emit({"type": "done", "ok": True, "installed": []})
+        return
+    emit({"type": "progress", "stage": "pip_install", "percent": None,
+          "packages": pkgs})
+    cmd = [sys.executable, "-m", "pip", "install", "--user",
+           "--break-system-packages", "--disable-pip-version-check",
+           "--no-input"] + pkgs
+    proc = sp.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                  timeout=600)
+    if proc.returncode != 0:
+        tail = (proc.stderr.strip() or proc.stdout.strip())[-800:]
+        die(3, f"pip install failed: {tail}")
+    emit({"type": "done", "ok": True, "installed": pkgs})
+
+
+def cmd_offline(args):
+    name = (args.name or "").strip()
+    if not name or len(name) > 16 or not re.match(r"^[A-Za-z0-9_]+$", name):
+        die(2, "offline name must be 1-16 chars [A-Za-z0-9_]")
+    import hashlib
+    import uuid as ulib
+    digest = hashlib.md5(f"OfflinePlayer:{name}".encode()).digest()
+    raw = bytearray(digest)
+    raw[6] = (raw[6] & 0x0F) | 0x30
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    uid = str(ulib.UUID(bytes=bytes(raw))).replace("-", "")
+    account = {"id": uid, "name": name, "access_token": "0", "offline": True}
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    accounts = json.loads(ACCOUNTS_FILE.read_text()) if ACCOUNTS_FILE.exists() else []
+    accounts = [a for a in accounts if a["id"] != account["id"]] + [account]
+    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+    emit({"type": "done", "ok": True, "account_id": uid, "username": name,
+          "offline": True})
+
+
+def cmd_unaccount(args):
+    if not ACCOUNTS_FILE.exists():
+        die(4, "no accounts")
+    accounts = json.loads(ACCOUNTS_FILE.read_text())
+    gone = next((a for a in accounts if a["id"] == args.account), None)
+    if gone is None:
+        die(4, f"account not found: {args.account}")
+    if gone.get("ely"):
+        _ely_request(ELY_INVALIDATE_URL, {
+            "accessToken": gone.get("access_token", ""),
+            "clientToken": gone.get("client_token", ""),
+        })
+        # invalidate never fails hard; local remove always happens
+        accounts = json.loads(ACCOUNTS_FILE.read_text())
+    kept = [a for a in accounts if a["id"] != args.account]
+    ACCOUNTS_FILE.write_text(json.dumps(kept, indent=2))
+    emit({"type": "done", "ok": True, "removed": args.account})
+
+
+# --- Ely.by accounts (public Yggdrasil-compatible API, docs.ely.by) --------
+
+ELY_AUTH_URL = "https://authserver.ely.by/auth/authenticate"
+ELY_REFRESH_URL = "https://authserver.ely.by/auth/refresh"
+ELY_VALIDATE_URL = "https://authserver.ely.by/auth/validate"
+ELY_SIGNOUT_URL = "https://authserver.ely.by/auth/signout"
+ELY_INVALIDATE_URL = "https://authserver.ely.by/auth/invalidate"
+ELY_SKIN_URL = "https://skinsystem.ely.by/skins/{name}.png"
+ELY_SKIN_URL2 = "https://skinsystem.ely.by/skins?name={name}.png"
+SKINS_CACHE = CONFIG_DIR / "skins"
+
+
+def _ely_request(url: str, payload: dict):
+    import urllib.request
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data,
+                                 headers={"User-Agent": MODRINTH_UA,
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except Exception as e:
+        die(4, f"Ely.by request failed: {e}")
+
+
+def _ely_error(status: int, payload: dict) -> str:
+    if isinstance(payload, dict):
+        msg = payload.get("errorMessage") or payload.get("error") or ""
+        cause = payload.get("cause") or ""
+        detail = f"{msg} {cause}".strip()
+        if detail:
+            return detail
+    return f"Ely.by error (HTTP {status})"
+
+
+def _load_accounts():
+    try:
+        return json.loads(ACCOUNTS_FILE.read_text()) if ACCOUNTS_FILE.exists() else []
+    except ValueError:
+        return []
+
+
+def _save_accounts(accounts):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+
+
+def cmd_ely_auth(args):
+    username = (args.username or "").strip()
+    password = (args.password or "")
+    if not username or not password:
+        die(2, "username and password required")
+    import uuid as _ulib
+    client_token = _ulib.uuid4().hex
+    status, payload = _ely_request(ELY_AUTH_URL, {
+        "username": username,
+        "password": password,
+        "clientToken": client_token,
+        "requestUser": True,
+    })
+    if status != 200 or not isinstance(payload, dict) or "accessToken" not in payload:
+        die(4, _ely_error(status, payload))
+    profile = payload.get("selectedProfile") or {}
+    if "id" not in profile:
+        die(4, "Ely.by account has no Minecraft profile")
+    account = {
+        "id": profile["id"].replace("-", ""),
+        "name": profile.get("name", username),
+        "access_token": payload["accessToken"],
+        "client_token": payload.get("clientToken", client_token),
+        "ely": True,
+    }
+    accounts = [a for a in _load_accounts() if a.get("id") != account["id"]] + [account]
+    _save_accounts(accounts)
+    emit({"type": "done", "ok": True, "account_id": account["id"],
+          "username": account["name"], "ely": True})
+
+
+def _find_ely(account_id: str):
+    for a in _load_accounts():
+        if a.get("id") == account_id and a.get("ely"):
+            return a
+    return None
+
+
+def cmd_ely_refresh(args):
+    acc = _find_ely(args.account or "")
+    if not acc:
+        die(4, "Ely.by account not found")
+    status, payload = _ely_request(ELY_REFRESH_URL, {
+        "accessToken": acc.get("access_token", ""),
+        "clientToken": acc.get("client_token", ""),
+        "requestUser": True,
+    })
+    if status != 200 or "accessToken" not in payload:
+        die(4, _ely_error(status, payload))
+    accounts = _load_accounts()
+    for a in accounts:
+        if a.get("id") == acc["id"]:
+            a["access_token"] = payload["accessToken"]
+            if payload.get("clientToken"):
+                a["client_token"] = payload["clientToken"]
+            if (payload.get("selectedProfile") or {}).get("name"):
+                a["name"] = payload["selectedProfile"]["name"]
+    _save_accounts(accounts)
+    emit({"type": "done", "ok": True, "account_id": acc["id"],
+          "username": acc["name"]})
+
+
+def cmd_ely_validate(args):
+    acc = _find_ely(args.account or "")
+    if not acc:
+        die(4, "Ely.by account not found")
+    status, payload = _ely_request(ELY_VALIDATE_URL, {
+        "accessToken": acc.get("access_token", ""),
+        "clientToken": acc.get("client_token", ""),
+    })
+    if status == 200:
+        emit({"type": "done", "ok": True, "valid": True,
+              "account_id": acc["id"]})
+    elif status == 403:
+        emit({"type": "done", "ok": True, "valid": False,
+              "account_id": acc["id"]})
+    else:
+        die(4, _ely_error(status, payload))
+
+
+def cmd_ely_skin(args):
+    # Skin resolution per account type (Ely.by docs + Mojang API):
+    # - Ely.by nicknames: skinsystem.ely.by first (local wardrobe database).
+    # - Microsoft (premium UUID): Mojang session profile by UUID, no auth needed.
+    # - Offline: skinsystem proxy by name (finds premium namesakes), else 204.
+    # Changing skins has no public API anywhere: Ely -> ely.by wardrobe,
+    # Microsoft -> PUT minecraftservices (needs valid MS token) or minecraft.net.
+    name = (args.name or "").strip()
+    uuid = (getattr(args, "uuid", "") or "").strip().replace("-", "")
+    if not name:
+        die(2, "name required")
+    SKINS_CACHE.mkdir(parents=True, exist_ok=True)
+    full = SKINS_CACHE / f"{name}.png"
+    head = SKINS_CACHE / f"{name}-head.png"
+    model_file = SKINS_CACHE / f"{name}.model"
+    if not args.refresh and full.is_file() and head.is_file():
+        try:
+            cached_model = model_file.read_text().strip() or "classic"
+        except OSError:
+            cached_model = "classic"
+        emit({"type": "done", "ok": True, "name": name,
+              "skin": str(full), "head": str(head), "cached": True,
+              "model": cached_model})
+        return
+    import base64
+    import urllib.request
+
+    def _get(url):
+        req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                return resp.read()
+        return None
+
+    def _mojang_skin(username):
+        try:
+            raw = _get(f"https://api.mojang.com/users/profiles/minecraft/{username}")
+            uid = json.loads(raw.decode()).get("id", "")
+            if not uid:
+                return None
+            raw = _get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uid}")
+            for prop in json.loads(raw.decode()).get("properties", []):
+                if prop.get("name") == "textures":
+                    tex = json.loads(base64.b64decode(prop.get("value", "")))
+                    url = ((tex.get("textures") or {}).get("SKIN") or {}).get("url", "")
+                    if url:
+                        return _get(url)
+        except Exception:
+            return None
+        return None
+
+    def _mojang_by_uuid(uid):
+        try:
+            raw = _get(f"https://sessionserver.mojang.com/session/minecraft/profile/{uid}")
+            for prop in json.loads(raw.decode()).get("properties", []):
+                if prop.get("name") == "textures":
+                    tex = json.loads(base64.b64decode(prop.get("value", "")))
+                    skin = ((tex.get("textures") or {}).get("SKIN")) or {}
+                    if skin.get("url"):
+                        return _get(skin["url"]), skin.get("metadata", {}).get("model", "")
+        except Exception:
+            return None, ""
+        return None, ""
+
+    data, model = None, ""
+    if uuid and not (len(uuid) == 32 and set(uuid) == set("0")):
+        try:
+            data, model = _mojang_by_uuid(uuid)
+        except Exception:
+            data, model = None, ""
+    if not data:
+        for tmpl in (ELY_SKIN_URL, ELY_SKIN_URL2):
+            try:
+                data = _get(tmpl.format(name=name))
+                if data:
+                    break
+            except Exception:
+                continue
+    if not data:
+        data = _mojang_skin(name)
+        model = ""
+    if not data:
+        die(3, f"No skin found for {name} (Ely.by + Mojang empty)")
+    try:
+        full.write_bytes(data)
+        try:
+            from PIL import Image
+            im = Image.open(full).convert("RGBA")
+            w, h = im.size
+            # classic 64x64 (or 64x32 legacy): face + overlay
+            sx, sy = (w // 64, h // 64) if w >= 64 and h >= 32 else (1, 1)
+            face = Image.new("RGBA", (8 * sx, 8 * sy), (0, 0, 0, 0))
+            face.alpha_composite(im.crop((8 * sx, 8 * sy, 16 * sx, 16 * sy)))
+            if w >= 64 and h >= 64:
+                face.alpha_composite(im.crop((40 * sx, 8 * sy, 48 * sx, 16 * sy)))
+            face = face.resize((96, 96), Image.NEAREST)
+            face.save(head)
+        except Exception:
+            if head.exists():
+                head.unlink(missing_ok=True)
+    except OSError as e:
+        die(3, f"Cannot save skin: {e}")
+    try:
+        (SKINS_CACHE / f"{name}.model").write_text(model or "classic")
+    except OSError:
+        pass
+    emit({"type": "done", "ok": True, "name": name,
+          "skin": str(full), "head": str(head), "cached": False,
+          "model": model or "classic"})
+
+
+def cmd_auth_config(args):
+    cid = (args.client_id or "").strip()
+    show = getattr(args, "show", False)
+    if show and not cid:
+        emit({"type": "done", "ok": True,
+              "configured": not effective_client_id().startswith("REPLACE_WITH"),
+              "client_id": ""})
+        return
+    if not cid or len(cid) < 8:
+        die(2, "client_id looks invalid (expected Azure app UUID)")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    AZURE_JSON.write_text(json.dumps({"client_id": cid}, indent=2))
+    emit({"type": "done", "ok": True, "configured": True})
+
+
+def _mods_dir(mc_dir=None) -> Path:
+    base = mc_dir or MC_DIR
+    d = base / "mods"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def cmd_mods_list(args):
+    _ = _mc_dir(args)
+    d = _mods_dir()
+    mods = []
+    for p in sorted(d.iterdir()):
+        if not p.is_file():
+            continue
+        suf = p.suffix.lower()
+        if suf == ".jar":
+            mods.append({"file": p.name, "enabled": True,
+                         "size": p.stat().st_size})
+        elif p.name.endswith(".jar.disabled"):
+            mods.append({"file": p.name, "enabled": False,
+                         "size": p.stat().st_size})
+    emit({"type": "done", "ok": True, "mods": mods,
+          "mods_dir": str(d)})
+
+
+def cmd_mod_toggle(args):
+    _ = _mc_dir(args)
+    d = _mods_dir()
+    name = Path(args.file).name
+    enabled_p = d / name
+    disabled_p = d / (name if name.endswith(".disabled") else name + ".disabled")
+    if enabled_p.is_file() and enabled_p.suffix.lower() == ".jar":
+        enabled_p.rename(d / (enabled_p.name + ".disabled"))
+        emit({"type": "done", "ok": True, "file": enabled_p.name,
+              "enabled": False})
+    elif disabled_p.is_file():
+        target = d / disabled_p.name[: -len(".disabled")]
+        disabled_p.rename(target)
+        emit({"type": "done", "ok": True, "file": target.name,
+              "enabled": True})
+    else:
+        die(2, f"mod not found: {name}")
+
+
+def cmd_mods_add(args):
+    _ = _mc_dir(args)
+    import shutil as _sh
+    src = Path(args.path).expanduser()
+    if not (src.is_file() and src.suffix.lower() == ".jar"):
+        die(2, f"not a .jar file: {src}")
+    d = _mods_dir()
+    dest = d / src.name
+    if dest.exists() and not args.force:
+        die(2, f"already exists: {src.name} (use --force to overwrite)")
+    _sh.copy2(src, dest)
+    emit({"type": "done", "ok": True, "file": dest.name})
+
+
+def cmd_stop(args):
+    import signal as _sig
+    target = (args.account or "").strip()
+    accounts = []
+    if ACCOUNTS_FILE.exists():
+        try:
+            accounts = json.loads(ACCOUNTS_FILE.read_text())
+        except ValueError:
+            accounts = []
+    ids = [a["id"] for a in accounts
+           if not target or a["id"] == target or a.get("name") == target]
+    if target and not ids:
+        ids = [target]
+    if not ids:
+        die(2, "no accounts to stop")
+    stopped, alive = [], []
+    for aid in ids:
+        lp = _account_lock_path(aid)
+        if not lp.exists():
+            continue
+        try:
+            pid = int(lp.read_text().strip())
+        except (ValueError, OSError):
+            lp.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(pid, _sig.SIGTERM)
+            stopped.append({"account": aid, "pid": pid})
+        except OSError:
+            try:
+                os.kill(pid, 0)
+                alive.append({"account": aid, "pid": pid})
+            except OSError:
+                lp.unlink(missing_ok=True)
+    emit({"type": "done", "ok": True, "stopped": stopped,
+          "still_running": alive})
+
+
+# --- Modrinth (public API, no key needed) -------------------------------
+
+MODRINTH_API = "https://api.modrinth.com/v2"
+MODRINTH_UA = "CorkyTux/3.0 (github.com/Matts-lab69/CorkyTux-Launcher)"
+
+ADDON_DIRS = {
+    "mods": "mods",
+    "resourcepacks": "resourcepacks",
+    "shaders": "shaderpacks",
+}
+
+
+def _mr_get(path: str, params: dict = None):
+    import urllib.request
+    import urllib.parse
+    url = MODRINTH_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"Modrinth request failed: {e}")
+
+
+def _sidecar_path(addon_dir: Path, filename: str) -> Path:
+    return addon_dir / (filename + ".corky.json")
+
+
+def cmd_mod_search(args):
+    project_type = (args.project_type or "mod").strip()
+    facets = [[f"project_type:{project_type}"]]
+    if args.mc_version:
+        facets.append([f"versions:{args.mc_version}"])
+    if args.loader and args.loader != "vanilla":
+        facets.append([f"categories:{args.loader}"])
+    data = _mr_get("/search", {
+        "query": args.query or "",
+        "facets": json.dumps(facets),
+        "limit": max(1, min(50, args.limit or 20)),
+        "offset": max(0, args.offset or 0),
+    })
+    hits = []
+    for h in data.get("hits", []):
+        hits.append({
+            "project_id": h.get("project_id"),
+            "slug": h.get("slug"),
+            "title": h.get("title"),
+            "author": h.get("author"),
+            "description": h.get("description"),
+            "icon_url": h.get("icon_url"),
+            "downloads": h.get("downloads"),
+            "categories": h.get("display_categories", []),
+            "versions": h.get("versions", [])[:5],
+        })
+    emit({"type": "done", "ok": True, "hits": hits,
+          "total": data.get("total_hits", len(hits))})
+
+
+def _ptype_of_addon(addon_type: str) -> str:
+    return {"mods": "mod", "shaders": "shader",
+            "resourcepacks": "resourcepack"}.get(addon_type, "mod")
+
+
+def _mr_project_versions(project_id: str, mc_version: str = "",
+                         loader: str = "", project_type: str = "mod"):
+    params = {}
+    if mc_version:
+        params["game_versions"] = f'["{mc_version}"]'
+    # Shaders/resourcepacks don't use mod loaders (iris/optifine/minecraft);
+    # filtering their versions by fabric/forge always yields zero results.
+    if project_type == "mod" and loader and loader != "vanilla":
+        params["loaders"] = f'["{loader}"]'
+    return _mr_get(f"/project/{project_id}/version", params)
+
+
+def cmd_mod_versions(args):
+    ptype = (getattr(args, "project_type", "") or "mod").strip()
+    versions = _mr_project_versions(args.project_id,
+                                    args.mc_version or "",
+                                    (args.loader or "").lower(), ptype)
+    out = []
+    for v in versions:
+        files = [{"filename": f.get("filename"), "url": f.get("url"),
+                  "primary": f.get("primary", False),
+                  "size": f.get("size", 0)}
+                 for f in v.get("files", [])]
+        out.append({
+            "version_id": v.get("id"),
+            "version_number": v.get("version_number"),
+            "name": v.get("name"),
+            "date": v.get("date_published", ""),
+            "loaders": v.get("loaders", []),
+            "game_versions": v.get("game_versions", [])[-3:],
+            "files": files,
+        })
+    emit({"type": "done", "ok": True, "project_id": args.project_id,
+          "versions": out})
+
+
+def _download_with_progress(url: str, dest: Path, stage: str):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
+    downloaded = 0
+    total = 0
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
+            try:
+                total = int(resp.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                total = 0
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                pct = round(downloaded * 100 / total, 1) if total else None
+                emit({"type": "progress", "stage": stage, "percent": pct})
+    except Exception as e:
+        if dest.exists():
+            dest.unlink(missing_ok=True)
+        die(3, f"Download failed: {e}")
+    if dest.stat().st_size < 1024:
+        dest.unlink(missing_ok=True)
+        die(3, "Downloaded file too small, aborting")
+
+
+def cmd_mod_install(args):
+    mc_base = _mc_dir(args)
+    addon_type = (args.addon_type or "mods").strip()
+    if addon_type not in ADDON_DIRS:
+        die(2, f"addon_type must be one of {list(ADDON_DIRS)}")
+    ptype = _ptype_of_addon(addon_type)
+    versions = _mr_project_versions(args.project_id,
+                                    args.mc_version or "",
+                                    (args.loader or "").lower(), ptype)
+    if args.version_id:
+        pick = next((v for v in versions if v.get("id") == args.version_id), None)
+        if not pick:
+            die(2, "version_id not found for this project/filters")
+    else:
+        pick = versions[0] if versions else None
+        if not pick:
+            die(3, "No matching version on Modrinth for this MC/loader")
+    files = pick.get("files", [])
+    primary = next((f for f in files if f.get("primary")), files[0] if files else None)
+    if not primary:
+        die(3, "Version has no files")
+    target_dir = mc_base / ADDON_DIRS[addon_type]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    filename = primary["filename"]
+    dest = target_dir / filename
+    if dest.exists() and not args.force:
+        die(2, f"Already installed: {filename}")
+    emit({"type": "progress", "stage": f"downloading-{filename}", "percent": 0})
+    _download_with_progress(primary["url"], dest, "downloading")
+    proj = _mr_get(f"/project/{args.project_id}")
+    _sidecar_path(target_dir, filename).write_text(json.dumps({
+        "project_id": args.project_id,
+        "version_id": pick.get("id"),
+        "version_number": pick.get("version_number"),
+        "title": proj.get("title", filename),
+        "slug": proj.get("slug", ""),
+        "icon_url": proj.get("icon_url", ""),
+        "loaders": pick.get("loaders", []),
+        "game_versions": pick.get("game_versions", []),
+        "addon_type": addon_type,
+    }, indent=2))
+    emit({"type": "done", "ok": True, "file": filename,
+          "title": proj.get("title", filename),
+          "version_number": pick.get("version_number"),
+          "version_id": pick.get("id"), "addon_type": addon_type})
+
+
+# --- CurseForge (keyed API, docs.curseforge.com) ---------------------------
+# Key lives in curseforge.json (mode 600), set via `curse-auth-config`.
+# Never printed back: `--show` only reports configured true/false.
+
+CF_API = "https://api.curseforge.com/v1"
+CF_GAME_ID = 432
+CF_CLASS = {"mod": 6, "modpack": 4471, "resourcepack": 12, "shader": 6552}
+CF_LOADER = {"forge": 1, "fabric": 4, "quilt": 5, "neoforge": 6}
+CF_LOADER_NAME = {v: k for k, v in CF_LOADER.items()}
+CURSE_JSON = CONFIG_DIR / "curseforge.json"
+# Built-in key: same public key PineconeMC/Prism ships (works out of the
+# box). A user-saved key in curseforge.json (via `curse-auth-config`)
+# takes precedence.
+CURSE_BUILTIN_KEY = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC"
+
+
+def cmd_curse_auth_config(args):
+    key = (args.api_key or "").strip()
+    show = getattr(args, "show", False)
+    if show and not key:
+        try:
+            data = json.loads(CURSE_JSON.read_text())
+            configured = len(str(data.get("api_key", "")).strip()) >= 20
+        except (OSError, ValueError):
+            configured = False
+        if not configured:
+            configured = len(CURSE_BUILTIN_KEY.strip()) >= 20
+        emit({"type": "done", "ok": True, "configured": configured,
+              "api_key": ""})
+        return
+    if len(key) < 20:
+        die(2, "api_key looks invalid (paste the full $2a$10$... key)")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CURSE_JSON.write_text(json.dumps({"api_key": key}, indent=2))
+    try:
+        os.chmod(CURSE_JSON, 0o600)
+    except OSError:
+        pass
+    emit({"type": "done", "ok": True, "configured": True})
+
+
+def cmd_curse_test(args):
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+    key = _cf_key()
+    req = urllib.request.Request(CF_API + "/games/432", headers={
+        "x-api-key": key,
+        "User-Agent": MODRINTH_UA,
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+            emit({"type": "done", "ok": True, "reachable": True,
+                  "game": (data.get("data") or {}).get("name", "")})
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            pass
+        if e.code in (401, 403) and not body.strip():
+            die(4, "CurseForge refuses this connection (empty 403): the active API key is invalid or revoked.")
+        die(4, f"CurseForge test failed: HTTP {e.code} {body.strip()}")
+    except Exception as e:
+        die(3, f"CurseForge test failed: {e}")
+
+
+def _cf_key() -> str:
+    try:
+        key = str(json.loads(CURSE_JSON.read_text()).get("api_key", "")).strip()
+    except (OSError, ValueError):
+        key = ""
+    if len(key) < 20:
+        key = CURSE_BUILTIN_KEY.strip()
+    if len(key) < 20:
+        die(4, "CurseForge API key missing and no built-in key set.")
+    return key
+
+
+def _cf_get(path: str, params: dict = None):
+    import urllib.request
+    import urllib.parse
+    import urllib.error
+    url = CF_API + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={
+        "x-api-key": _cf_key(),
+        "User-Agent": MODRINTH_UA,
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            die(4, f"CurseForge rejected the request ({e.code}): invalid API key.")
+        die(3, f"CurseForge request failed: HTTP {e.code}")
+    except Exception as e:
+        die(3, f"CurseForge request failed: {e}")
+
+
+def _cf_kind(args) -> str:
+    kind = (getattr(args, "kind", "") or "mod").strip().lower()
+    return kind if kind in CF_CLASS else "mod"
+
+
+def _cf_loader_id(loader: str):
+    return CF_LOADER.get((loader or "").lower(), 0)
+
+
+def _cf_hit_loaders(mod: dict):
+    out = []
+    for idx in mod.get("latestFilesIndexes", []) or []:
+        ml = idx.get("modLoader")
+        name = CF_LOADER_NAME.get(ml, "")
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def cmd_cf_search(args):
+    kind = _cf_kind(args)
+    params = {
+        "gameId": CF_GAME_ID,
+        "classId": CF_CLASS[kind],
+        "searchFilter": args.query or "",
+        "pageSize": max(1, min(50, args.limit or 20)),
+        "sortField": 2,
+        "sortOrder": "desc",
+    }
+    if args.mc_version:
+        params["gameVersion"] = args.mc_version
+    lid = _cf_loader_id(getattr(args, "loader", "") or "")
+    if kind == "mod" and lid:
+        params["modLoaderType"] = lid
+    data = _cf_get("/mods/search", params)
+    hits = []
+    for m in data.get("data", []):
+        authors = m.get("authors", []) or []
+        logo = m.get("logo", {}) or {}
+        hits.append({
+            "mod_id": str(m.get("id", "")),
+            "slug": m.get("slug", ""),
+            "title": m.get("name", ""),
+            "author": authors[0].get("name", "") if authors else "",
+            "description": m.get("summary", ""),
+            "icon_url": logo.get("url", ""),
+            "downloads": m.get("downloadCount", 0),
+            "categories": _cf_hit_loaders(m),
+            "versions": [],
+        })
+    emit({"type": "done", "ok": True, "hits": hits,
+          "total": len(hits)})
+
+
+def _cf_files(mod_id: str, mc_version: str = "", loader: str = ""):
+    params = {"pageSize": 50}
+    if mc_version:
+        params["gameVersion"] = mc_version
+    lid = _cf_loader_id(loader)
+    if lid:
+        params["modLoaderType"] = lid
+    return _cf_get(f"/mods/{mod_id}/files", params).get("data", [])
+
+
+def cmd_cf_versions(args):
+    kind = _cf_kind(args)
+    loader = (args.loader or "").lower() if kind == "mod" else ""
+    files = _cf_files(args.mod_id, args.mc_version or "", loader)
+    out = []
+    for f in files:
+        games = f.get("gameVersions", []) or []
+        games = [g for g in games if g and g[0].isdigit()][:3]
+        out.append({
+            "version_id": str(f.get("id", "")),
+            "version_number": f.get("fileName", ""),
+            "name": f.get("displayName", ""),
+            "date": (f.get("fileDate", "") or "")[:10],
+            "loaders": [],
+            "game_versions": games,
+            "download_url": f.get("downloadUrl", ""),
+        })
+    emit({"type": "done", "ok": True, "mod_id": args.mod_id,
+          "versions": out})
+
+
+def cmd_cf_install(args):
+    mc_base = _mc_dir(args)
+    addon_type = (args.addon_type or "mods").strip()
+    if addon_type not in ADDON_DIRS:
+        die(2, f"addon_type must be one of {list(ADDON_DIRS)}")
+    kind = _cf_kind(args)
+    loader = (args.loader or "").lower() if kind == "mod" else ""
+    files = _cf_files(args.mod_id, args.mc_version or "", loader)
+    if args.file_id:
+        pick = next((f for f in files if str(f.get("id", "")) == args.file_id), None)
+        if not pick:
+            die(2, "file_id not found for this mod/filters")
+    else:
+        pick = next((f for f in files if f.get("downloadUrl")), None)
+        if not pick:
+            die(3, "No downloadable file on CurseForge for this MC/loader")
+    filename = pick.get("fileName", "")
+    if not filename:
+        die(3, "CurseForge file has no name")
+    target_dir = mc_base / ADDON_DIRS[addon_type]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest = target_dir / filename
+    if dest.exists() and not args.force:
+        die(2, f"Already installed: {filename}")
+    emit({"type": "progress", "stage": f"downloading-{filename}", "percent": 0})
+    _download_with_progress(pick["downloadUrl"], dest, "downloading")
+    try:
+        mod = _cf_get(f"/mods/{args.mod_id}").get("data", {})
+        title = mod.get("name", filename)
+        icon = ((mod.get("logo", {}) or {}).get("url", ""))
+    except Exception:
+        title, icon = filename, ""
+    _sidecar_path(target_dir, filename).write_text(json.dumps({
+        "source": "curseforge",
+        "mod_id": args.mod_id,
+        "file_id": str(pick.get("id", "")),
+        "version_number": pick.get("displayName", ""),
+        "title": title,
+        "icon_url": icon,
+        "game_versions": pick.get("gameVersions", []),
+        "addon_type": addon_type,
+    }, indent=2))
+    emit({"type": "done", "ok": True, "file": filename,
+          "title": title,
+          "version_number": pick.get("displayName", ""),
+          "version_id": str(pick.get("id", "")), "addon_type": addon_type})
+
+
+def _cf_pack_manifest(pack_id: str, file_id: str):
+    """Download a CurseForge modpack file and return (manifest, extract_dir, tmpdir)."""
+    import tempfile
+    import zipfile
+    files = _cf_get(f"/mods/{pack_id}/files", {"pageSize": 50}).get("data", [])
+    if file_id:
+        pick = next((f for f in files if str(f.get("id", "")) == file_id), None)
+        if not pick:
+            die(2, "file_id not found for this modpack")
+    else:
+        pick = next((f for f in files if f.get("downloadUrl")), None)
+        if not pick:
+            die(3, "No downloadable file for this modpack on CurseForge")
+    url = pick.get("downloadUrl", "")
+    if not url:
+        die(3, "CurseForge pack file has no download URL")
+    tmp = Path(tempfile.mkdtemp(prefix="cfpack-"))
+    zpath = tmp / "pack.zip"
+    emit({"type": "progress", "stage": "downloading-modpack", "percent": 0})
+    _download_with_progress(url, zpath, "downloading-modpack")
+    dest = tmp / "unzipped"
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            z.extractall(dest)
+    except Exception as e:
+        die(3, f"Invalid modpack zip: {e}")
+    manifest_path = dest / "manifest.json"
+    if not manifest_path.is_file():
+        die(3, "Modpack zip has no manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except ValueError:
+        die(3, "Modpack manifest.json is corrupt")
+    return manifest, dest, tmp
+
+
+def _cf_pack_loader(manifest: dict):
+    """(loader, loader_version, mc_version) from a CF manifest."""
+    mc = (((manifest.get("minecraft") or {}).get("version")) or "").strip()
+    loaders = ((manifest.get("minecraft") or {}).get("modLoaders") or [])
+    primary = next((l for l in loaders if l.get("primary")), loaders[0] if loaders else None)
+    raw = str((primary or {}).get("id", "") or "").strip().lower()
+    loader, lver = "", ""
+    for name in ("neoforge", "forge", "fabric", "quilt"):
+        if raw == name or raw.startswith(name + "-"):
+            loader = name
+            lver = raw[len(name) + 1:] if raw.startswith(name + "-") else ""
+            break
+    return loader, lver, mc
+
+
+def cmd_cf_modpack_install(args):
+    _require_mll()
+    import shutil as _sh
+    dest_base = Path((args.mc_dir or "").strip() or str(MC_DIR)).expanduser()
+    dest_base.mkdir(parents=True, exist_ok=True)
+    manifest, extracted, tmp = _cf_pack_manifest(args.pack_id, args.file_id or "")
+    try:
+        loader, lver, mc = _cf_pack_loader(manifest)
+        title = str(manifest.get("name", "") or "CurseForge pack")
+        if not mc:
+            die(3, "Modpack manifest has no Minecraft version")
+        if loader and loader != "vanilla":
+            try:
+                ml = mll.mod_loader.get_mod_loader(loader)
+            except ValueError:
+                die(2, f"loader not supported: {loader}")
+            if not lver:
+                try:
+                    lver = ml.get_latest_loader_version(mc)
+                except Exception as e:
+                    die(3, f"Could not resolve {loader} version: {e}")
+            emit({"type": "progress", "stage": f"installing-{loader}-{lver}",
+                  "percent": None})
+            try:
+                installed_id = ml.install(mc, str(dest_base),
+                                          loader_version=lver,
+                                          callback=_install_callbacks())
+            except Exception as e:
+                die(3, f"Base install failed: {e}")
+        else:
+            try:
+                mll.install.install_minecraft_version(
+                    version=mc,
+                    minecraft_directory=str(dest_base),
+                    callback=_install_callbacks(),
+                )
+            except Exception as e:
+                die(3, f"Base install failed: {e}")
+            installed_id = mc
+            lver = ""
+        entries = [f for f in manifest.get("files", []) or []
+                   if f.get("required", True)]
+        mods_dir = dest_base / "mods"
+        mods_dir.mkdir(parents=True, exist_ok=True)
+        total = len(entries)
+        for i, entry in enumerate(entries):
+            pid, fid = entry.get("projectID"), entry.get("fileID")
+            try:
+                info = _cf_get(f"/mods/{pid}/files/{fid}")
+                fdata = info.get("data", {})
+                url = fdata.get("downloadUrl", "")
+                fname = fdata.get("fileName", "")
+                if not url or not fname:
+                    continue
+                dest = mods_dir / fname
+                if not dest.exists():
+                    emit({"type": "progress",
+                          "stage": f"mods-{i + 1}/{total}-{fname}",
+                          "percent": round((i / max(1, total)) * 100, 1)})
+                    _download_with_progress(url, dest, f"mods-{i + 1}/{total}")
+            except Exception:
+                continue
+        over = str(manifest.get("overrides", "") or "overrides").lstrip("/")
+        over_dir = extracted / over
+        if over_dir.is_dir():
+            for item in over_dir.iterdir():
+                tgt = dest_base / item.name
+                try:
+                    if tgt.exists():
+                        if tgt.is_dir():
+                            _sh.rmtree(tgt, ignore_errors=True)
+                        else:
+                            tgt.unlink(missing_ok=True)
+                    if item.is_dir():
+                        _sh.copytree(item, tgt)
+                    else:
+                        _sh.copy2(item, tgt)
+                except OSError:
+                    continue
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+    emit({"type": "done", "ok": True, "version": installed_id,
+          "title": title, "mc_version": mc,
+          "pack_id": args.pack_id})
+
+
+def cmd_cf_project(args):
+    mod = _cf_get(f"/mods/{args.mod_id}").get("data", {})
+    screenshots = [s.get("url", "") for s in mod.get("screenshots", []) or [] if s.get("url")][:4]
+    logo = mod.get("logo", {}) or {}
+    cats = [c.get("name", "") for c in mod.get("categories", []) or [] if c.get("name")]
+    emit({"type": "done", "ok": True, "project": {
+        "mod_id": str(mod.get("id", "")),
+        "slug": mod.get("slug", ""),
+        "title": mod.get("name", ""),
+        "description": mod.get("summary", ""),
+        "body": mod.get("summary", ""),
+        "icon_url": logo.get("url", ""),
+        "gallery": screenshots,
+        "downloads": mod.get("downloadCount", 0),
+        "followers": 0,
+        "categories": cats,
+        "loaders": _cf_hit_loaders(mod),
+        "game_versions": [],
+        "versions": [],
+        "project_type": "mod",
+    }})
+
+
+def _scan_addon_dir(addon_type: str, mc_dir=None):
+    base = mc_dir or MC_DIR
+    target_dir = base / ADDON_DIRS[addon_type]
+    target_dir.mkdir(parents=True, exist_ok=True)
+    items = []
+    for p in sorted(target_dir.iterdir()):
+        if not p.is_file() or p.suffix == ".json":
+            continue
+        name = p.name
+        enabled = True
+        if name.endswith(".jar.disabled") or name.endswith(".disabled"):
+            enabled = False
+        if p.suffix.lower() not in (".jar", ".zip", ".disabled"):
+            if addon_type == "mods" and not name.endswith((".jar", ".jar.disabled")):
+                continue
+        meta = {}
+        sc = target_dir / (name + ".corky.json")
+        if sc.is_file():
+            try:
+                meta = json.loads(sc.read_text())
+            except ValueError:
+                meta = {}
+        items.append({
+            "file": name, "enabled": enabled, "size": p.stat().st_size,
+            "title": meta.get("title", name),
+            "version_number": meta.get("version_number", ""),
+            "version_id": meta.get("version_id", ""),
+            "project_id": meta.get("project_id", ""),
+            "icon_url": meta.get("icon_url", ""),
+            "platform": "modrinth" if meta.get("project_id") else "local",
+        })
+    return target_dir, items
+
+
+def cmd_addons_list(args):
+    addon_type = (args.addon_type or "mods").strip()
+    if addon_type not in ADDON_DIRS:
+        die(2, f"addon_type must be one of {list(ADDON_DIRS)}")
+    target_dir, items = _scan_addon_dir(addon_type, _mc_dir(args))
+    emit({"type": "done", "ok": True, "addons": items,
+          "addon_type": addon_type, "dir": str(target_dir)})
+
+
+def cmd_mod_check_updates(args):
+    addon_type = (args.addon_type or "mods").strip()
+    if addon_type not in ADDON_DIRS:
+        die(2, f"addon_type must be one of {list(ADDON_DIRS)}")
+    _, items = _scan_addon_dir(addon_type, _mc_dir(args))
+    updates = []
+    ptype = _ptype_of_addon(addon_type)
+    for it in items:
+        pid = it.get("project_id", "")
+        if not pid:
+            continue
+        try:
+            versions = _mr_project_versions(pid, args.mc_version or "",
+                                            (args.loader or "").lower(), ptype)
+        except SystemExit:
+            raise
+        except Exception:
+            continue
+        if not versions:
+            continue
+        latest = versions[0]
+        if latest.get("id") != it.get("version_id"):
+            updates.append({
+                "file": it["file"], "title": it["title"],
+                "current": it.get("version_number", ""),
+                "latest": latest.get("version_number", ""),
+                "version_id": latest.get("id"),
+                "project_id": pid,
+            })
+    emit({"type": "done", "ok": True, "updates": updates,
+          "addon_type": addon_type})
+
+
+def cmd_mod_update(args):
+    addon_type = (args.addon_type or "mods").strip()
+    if addon_type not in ADDON_DIRS:
+        die(2, f"addon_type must be one of {list(ADDON_DIRS)}")
+    mc_base = _mc_dir(args)
+    target_dir = mc_base / ADDON_DIRS[addon_type]
+    sc = target_dir / (args.file + ".corky.json")
+    if not sc.is_file():
+        die(2, "No Modrinth metadata for this file (local addon?)")
+    try:
+        meta = json.loads(sc.read_text())
+    except ValueError:
+        die(2, "Corrupt metadata sidecar")
+    ptype = _ptype_of_addon(addon_type)
+    versions = _mr_project_versions(meta["project_id"], args.mc_version or "",
+                                    (args.loader or "").lower(), ptype)
+    if not versions:
+        die(3, "No versions found on Modrinth")
+    latest = versions[0]
+    if latest.get("id") == meta.get("version_id") and not args.force:
+        emit({"type": "done", "ok": True, "file": args.file,
+              "updated": False})
+        return
+    files = latest.get("files", [])
+    primary = next((f for f in files if f.get("primary")), files[0] if files else None)
+    if not primary:
+        die(3, "Version has no files")
+    dest = target_dir / primary["filename"]
+    emit({"type": "progress", "stage": f"updating-{primary['filename']}",
+          "percent": 0})
+    _download_with_progress(primary["url"], dest, "downloading")
+    old = target_dir / args.file
+    if dest != old and old.is_file():
+        old.unlink(missing_ok=True)
+        sc.unlink(missing_ok=True)
+    _sidecar_path(target_dir, dest.name).write_text(json.dumps({
+        **meta, "version_id": latest.get("id"),
+        "version_number": latest.get("version_number"),
+        "loaders": latest.get("loaders", []),
+        "game_versions": latest.get("game_versions", []),
+    }, indent=2))
+    emit({"type": "done", "ok": True, "file": dest.name,
+          "updated": True,
+          "version_number": latest.get("version_number")})
+
+
+def _download_mrpack_file(project_id: str, version_id: str, dest_dir: Path):
+    versions = _mr_project_versions(project_id, "", "", "modpack")
+    if version_id:
+        pick = next((v for v in versions if v.get("id") == version_id), None)
+        if not pick:
+            die(2, "version_id not found for this modpack")
+    else:
+        pick = versions[0] if versions else None
+        if not pick:
+            die(3, "Modpack has no versions on Modrinth")
+    files = pick.get("files", [])
+    mr = next((f for f in files if (f.get("filename") or "").endswith(".mrpack")),
+              files[0] if files else None)
+    if not mr:
+        die(3, "Version has no files")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / mr["filename"]
+    emit({"type": "progress", "stage": f"downloading-{mr['filename']}", "percent": 0})
+    _download_with_progress(mr["url"], dest, "downloading")
+    return dest, pick
+
+
+def _install_mrpack_file(mrpack_path: Path, mc_dir: Path, name_hint: str):
+    _require_mll()
+    mc_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        info = mll.mrpack.get_mrpack_information(str(mrpack_path))
+    except Exception:
+        info = {}
+    title = info.get("name", "") or name_hint
+    try:
+        mll.mrpack.install_mrpack(str(mrpack_path), str(mc_dir),
+                                  callback=_install_callbacks())
+    except Exception as e:
+        die(3, f"Modpack install failed: {e}")
+    try:
+        launch_version = mll.mrpack.get_mrpack_launch_version(str(mrpack_path))
+    except Exception:
+        launch_version = ""
+    if not launch_version:
+        installed = mll.utils.get_installed_versions(str(mc_dir))
+        launch_version = installed[-1]["id"] if installed else ""
+    return launch_version, title
+
+
+def cmd_modpack_install(args):
+    dest_base = Path((args.mc_dir or "").strip() or str(MC_DIR)).expanduser()
+    tmp = dest_base.parent / (dest_base.name + ".downloading")
+    try:
+        mrpack_path, pick = _download_mrpack_file(args.project_id,
+                                                  args.version_id or "", tmp)
+        launch_version, title = _install_mrpack_file(
+            mrpack_path, dest_base,
+            pick.get("name", "") if isinstance(pick, dict) else "")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+    emit({"type": "done", "ok": True, "version": launch_version,
+          "title": title, "mc_version": "",
+          "project_id": args.project_id})
+
+
+def cmd_modpack_import(args):
+    src = Path(args.path).expanduser()
+    if not (src.is_file() and src.suffix.lower() in (".mrpack", ".zip")):
+        die(2, f"not a modpack file: {src}")
+    dest_base = Path((args.mc_dir or "").strip() or str(MC_DIR)).expanduser()
+    launch_version, title = _install_mrpack_file(src, dest_base, src.stem)
+    emit({"type": "done", "ok": True, "version": launch_version,
+          "title": title, "mc_version": ""})
+
+
+def cmd_mod_project(args):
+    proj = _mr_get(f"/project/{args.project_id}")
+    gallery = [g.get("url", "") for g in proj.get("gallery", []) if g.get("url")][:4]
+    emit({"type": "done", "ok": True, "project": {
+        "project_id": proj.get("id", ""),
+        "slug": proj.get("slug", ""),
+        "title": proj.get("title", ""),
+        "description": proj.get("description", ""),
+        "body": (proj.get("body") or "")[:4000],
+        "icon_url": proj.get("icon_url", ""),
+        "gallery": gallery,
+        "downloads": proj.get("downloads", 0),
+        "followers": proj.get("followers", 0),
+        "categories": proj.get("display_categories", []),
+        "loaders": proj.get("loaders", []),
+        "game_versions": (proj.get("game_versions") or [])[-8:],
+        "versions": (proj.get("game_versions") or [])[:0],
+        "project_type": proj.get("project_type", ""),
+    }})
+
+
+def cmd_mod_match(args):
+    """PineconeMC-style hash matching: identify local jars via Modrinth
+    version_files (sha1) and write sidecars with title/icon so rows show
+    real metadata instead of the launcher fallback icon."""
+    import hashlib
+    addon_type = (args.addon_type or "mods").strip()
+    if addon_type not in ADDON_DIRS:
+        die(2, f"addon_type must be one of {list(ADDON_DIRS)}")
+    mc_base = _mc_dir(args)
+    target_dir = mc_base / ADDON_DIRS[addon_type]
+    if not target_dir.is_dir():
+        emit({"type": "done", "ok": True, "matched": 0, "total": 0})
+        return
+    files = [p for p in sorted(target_dir.iterdir())
+             if p.is_file() and not p.name.endswith((".corky.json", ".disabled"))
+             and not (target_dir / (p.name + ".corky.json")).exists()]
+    total = len(files)
+    if not total:
+        emit({"type": "done", "ok": True, "matched": 0, "total": 0})
+        return
+    hashes = {}
+    for idx, p in enumerate(files):
+        emit({"type": "progress", "stage": "hashing", "percent": round(idx * 50 / total, 1)})
+        try:
+            h = hashlib.sha1()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            hashes[h.hexdigest()] = p.name
+        except OSError:
+            continue
+    if not hashes:
+        emit({"type": "done", "ok": True, "matched": 0, "total": total})
+        return
+    import urllib.request
+    try:
+        body = json.dumps({"hashes": list(hashes.keys()), "algorithm": "sha1"}).encode()
+        req = urllib.request.Request(MODRINTH_API + "/version_files", data=body,
+                                     headers={"User-Agent": MODRINTH_UA,
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            found = json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"Modrinth hash lookup failed: {e}")
+    proj_ids = sorted({v.get("project_id", "") for v in found.values() if v.get("project_id")})
+    projects = {}
+    if proj_ids:
+        import urllib.parse
+        try:
+            qs = urllib.parse.urlencode({"ids": json.dumps(proj_ids)})
+            req = urllib.request.Request(MODRINTH_API + "/projects?" + qs,
+                                         headers={"User-Agent": MODRINTH_UA})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                for pr in json.loads(resp.read().decode()):
+                    projects[pr.get("id", "")] = pr
+        except Exception:
+            pass
+    matched = 0
+    for idx, (h, ver) in enumerate(found.items()):
+        fname = hashes.get(h, "")
+        if not fname:
+            continue
+        emit({"type": "progress", "stage": "matching",
+              "percent": 50 + round(idx * 50 / max(1, len(found)), 1)})
+        pr = projects.get(ver.get("project_id", ""), {})
+        _sidecar_path(target_dir, fname).write_text(json.dumps({
+            "project_id": ver.get("project_id", ""),
+            "version_id": ver.get("id", ""),
+            "version_number": ver.get("version_number", ""),
+            "title": pr.get("title", fname),
+            "slug": pr.get("slug", ""),
+            "icon_url": pr.get("icon_url", ""),
+            "loaders": ver.get("loaders", []),
+            "game_versions": ver.get("game_versions", []),
+            "addon_type": addon_type,
+        }, indent=2))
+        matched += 1
+    emit({"type": "done", "ok": True, "matched": matched, "total": total})
+
+
+# --- CLI ------------------------------------------------------------
+
+def _patch_requests_timeouts(default=120):
+    """mll petitions without timeout: a stalled connection hangs the worker
+    forever (30min+ silent installs). Inject a generous default instead."""
+    try:
+        import requests
+        _orig = requests.Session.request
+
+        def _wrapped(self, method, url, **kwargs):
+            kwargs.setdefault("timeout", default)
+            return _orig(self, method, url, **kwargs)
+
+        requests.Session.request = _wrapped
+    except Exception:
+        pass
+
+
+def main():
+    _patch_requests_timeouts()
+    parser = argparse.ArgumentParser(prog="minecraft-launcher")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("auth").set_defaults(func=cmd_auth)
+
+    p_versions = sub.add_parser("versions")
+    p_versions.add_argument("--all", action="store_true", help="include snapshots")
+    p_versions.set_defaults(func=cmd_versions)
+
+    p_install = sub.add_parser("install")
+    p_install.add_argument("--version", required=True)
+    p_install.add_argument("--loader", default="vanilla",
+                           help="vanilla/fabric/forge/neoforge/quilt")
+    p_install.add_argument("--loader-version", default="")
+    p_install.add_argument("--mc-dir", default="")
+    p_install.set_defaults(func=cmd_install)
+
+    p_lv = sub.add_parser("loader-versions")
+    p_lv.add_argument("--loader", required=True)
+    p_lv.add_argument("--mc-version", required=True)
+    p_lv.set_defaults(func=cmd_loader_versions)
+
+    p_ms = sub.add_parser("mod-search")
+    p_ms.add_argument("--query", default="")
+    p_ms.add_argument("--project-type", default="mod")
+    p_ms.add_argument("--mc-version", default="")
+    p_ms.add_argument("--loader", default="")
+    p_ms.add_argument("--limit", type=int, default=20)
+    p_ms.add_argument("--offset", type=int, default=0)
+    p_ms.set_defaults(func=cmd_mod_search)
+
+    p_mv = sub.add_parser("mod-versions")
+    p_mv.add_argument("--project-id", required=True)
+    p_mv.add_argument("--project-type", default="mod")
+    p_mv.add_argument("--mc-version", default="")
+    p_mv.add_argument("--loader", default="")
+    p_mv.set_defaults(func=cmd_mod_versions)
+
+    p_mi = sub.add_parser("mod-install")
+    p_mi.add_argument("--project-id", required=True)
+    p_mi.add_argument("--version-id", default="")
+    p_mi.add_argument("--mc-version", default="")
+    p_mi.add_argument("--loader", default="")
+    p_mi.add_argument("--addon-type", default="mods")
+    p_mi.add_argument("--force", action="store_true")
+    p_mi.add_argument("--mc-dir", default="")
+    p_mi.set_defaults(func=cmd_mod_install)
+
+    p_al = sub.add_parser("addons-list")
+    p_al.add_argument("--addon-type", default="mods")
+    p_al.add_argument("--mc-dir", default="")
+    p_al.set_defaults(func=cmd_addons_list)
+
+    p_cu = sub.add_parser("mod-check-updates")
+    p_cu.add_argument("--addon-type", default="mods")
+    p_cu.add_argument("--mc-version", default="")
+    p_cu.add_argument("--loader", default="")
+    p_cu.add_argument("--mc-dir", default="")
+    p_cu.set_defaults(func=cmd_mod_check_updates)
+
+    p_mpi = sub.add_parser("modpack-install")
+    p_mpi.add_argument("--project-id", required=True)
+    p_mpi.add_argument("--version-id", default="")
+    p_mpi.add_argument("--mc-dir", default="")
+    p_mpi.set_defaults(func=cmd_modpack_install)
+
+    p_mp = sub.add_parser("mod-project")
+    p_mp.add_argument("--project-id", required=True)
+    p_mp.set_defaults(func=cmd_mod_project)
+
+    p_mm = sub.add_parser("mod-match")
+    p_mm.add_argument("--addon-type", default="mods")
+    p_mm.add_argument("--mc-dir", default="")
+    p_mm.set_defaults(func=cmd_mod_match)
+
+    p_mpm = sub.add_parser("modpack-import")
+    p_mpm.add_argument("--path", required=True)
+    p_mpm.add_argument("--mc-dir", default="")
+    p_mpm.set_defaults(func=cmd_modpack_import)
+
+    p_mu = sub.add_parser("mod-update")
+    p_mu.add_argument("--file", required=True)
+    p_mu.add_argument("--addon-type", default="mods")
+    p_mu.add_argument("--mc-version", default="")
+    p_mu.add_argument("--loader", default="")
+    p_mu.add_argument("--force", action="store_true")
+    p_mu.add_argument("--mc-dir", default="")
+    p_mu.set_defaults(func=cmd_mod_update)
+
+    p_launch = sub.add_parser("launch")
+    p_launch.add_argument("--version", required=True)
+    p_launch.add_argument("--account", required=False)
+    p_launch.add_argument("--max-memory-mb", type=int, default=2048,
+                           help="JVM -Xmx in MB (default: 2048)")
+    p_launch.add_argument("--min-memory-mb", type=int, default=0,
+                           help="JVM -Xms in MB (default: unset)")
+    p_launch.add_argument("--jvm-arg", action="append", default=[],
+                           help="extra JVM argument (repeatable)")
+    p_launch.add_argument("--resolution", default="",
+                           help="WIDTHxHEIGHT (default: game default)")
+    p_launch.add_argument("--pre-hook", default="",
+                           help="shell command to run before launch")
+    p_launch.add_argument("--wrapper", default="",
+                           help="wrapper prefix, e.g. gamemoderun")
+    p_launch.add_argument("--java", required=False,
+                           help="explicit java binary (default: selected)")
+    p_launch.add_argument("--dry-run", action="store_true",
+                           help="build the command and print it without launching")
+    p_launch.add_argument("--mc-dir", default="")
+    p_launch.set_defaults(func=cmd_launch)
+
+    sub.add_parser("status").set_defaults(func=cmd_status)
+    sub.add_parser("setup").set_defaults(func=cmd_setup)
+
+    p_off = sub.add_parser("offline")
+    p_off.add_argument("--name", required=True)
+    p_off.set_defaults(func=cmd_offline)
+
+    p_unacc = sub.add_parser("unaccount")
+    p_unacc.add_argument("--account", required=True)
+    p_unacc.set_defaults(func=cmd_unaccount)
+
+    sub.add_parser("java-detect").set_defaults(func=cmd_java_detect)
+
+    p_jinst = sub.add_parser("java-install")
+    p_jinst.add_argument("--version", required=True,
+                         help="17, 21 or 25 (Adoptium Temurin JRE)")
+    p_jinst.set_defaults(func=cmd_java_install)
+
+    p_juse = sub.add_parser("java-use")
+    p_juse.add_argument("--path", required=True)
+    p_juse.set_defaults(func=cmd_java_use)
+
+    p_mjava = sub.add_parser("manifest-java")
+    p_mjava.add_argument("--mc-version", required=True)
+    p_mjava.set_defaults(func=cmd_manifest_java)
+
+    p_jreq = sub.add_parser("java-required")
+    p_jreq.add_argument("--version", required=True)
+    p_jreq.add_argument("--mc-dir", default="")
+    p_jreq.set_defaults(func=cmd_java_required)
+
+    p_eauth = sub.add_parser("ely-auth")
+    p_eauth.add_argument("--username", required=True)
+    p_eauth.add_argument("--password", required=True)
+    p_eauth.set_defaults(func=cmd_ely_auth)
+
+    p_eref = sub.add_parser("ely-refresh")
+    p_eref.add_argument("--account", required=True)
+    p_eref.set_defaults(func=cmd_ely_refresh)
+
+    p_eval = sub.add_parser("ely-validate")
+    p_eval.add_argument("--account", required=True)
+    p_eval.set_defaults(func=cmd_ely_validate)
+
+    p_eskin = sub.add_parser("ely-skin")
+    p_eskin.add_argument("--name", required=True)
+    p_eskin.add_argument("--uuid", default="")
+    p_eskin.add_argument("--refresh", action="store_true")
+    p_eskin.set_defaults(func=cmd_ely_skin)
+
+    p_acfg = sub.add_parser("auth-config")
+    p_acfg.add_argument("--client-id", default="")
+    p_acfg.add_argument("--show", action="store_true")
+    p_acfg.set_defaults(func=cmd_auth_config)
+
+    sub.add_parser("mods-list").set_defaults(func=cmd_mods_list)
+
+    p_mtog = sub.add_parser("mod-toggle")
+    p_mtog.add_argument("--file", required=True)
+    p_mtog.set_defaults(func=cmd_mod_toggle)
+
+    p_madd = sub.add_parser("mods-add")
+    p_madd.add_argument("--path", required=True)
+    p_madd.add_argument("--force", action="store_true")
+    p_madd.set_defaults(func=cmd_mods_add)
+
+    p_stop = sub.add_parser("stop")
+    p_stop.add_argument("--account", required=False, default="")
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_ccfg = sub.add_parser("curse-auth-config")
+    p_ccfg.add_argument("--api-key", default="")
+    p_ccfg.add_argument("--show", action="store_true")
+    p_ccfg.set_defaults(func=cmd_curse_auth_config)
+
+    sub.add_parser("curse-test").set_defaults(func=cmd_curse_test)
+
+    p_cfs = sub.add_parser("cf-search")
+    p_cfs.add_argument("--query", default="")
+    p_cfs.add_argument("--mc-version", default="")
+    p_cfs.add_argument("--loader", default="")
+    p_cfs.add_argument("--kind", default="mod")
+    p_cfs.add_argument("--limit", type=int, default=20)
+    p_cfs.set_defaults(func=cmd_cf_search)
+
+    p_cfv = sub.add_parser("cf-versions")
+    p_cfv.add_argument("--mod-id", required=True)
+    p_cfv.add_argument("--mc-version", default="")
+    p_cfv.add_argument("--loader", default="")
+    p_cfv.add_argument("--kind", default="mod")
+    p_cfv.set_defaults(func=cmd_cf_versions)
+
+    p_cfi = sub.add_parser("cf-install")
+    p_cfi.add_argument("--mod-id", required=True)
+    p_cfi.add_argument("--file-id", default="")
+    p_cfi.add_argument("--mc-version", default="")
+    p_cfi.add_argument("--loader", default="")
+    p_cfi.add_argument("--kind", default="mod")
+    p_cfi.add_argument("--addon-type", default="mods")
+    p_cfi.add_argument("--force", action="store_true")
+    p_cfi.add_argument("--mc-dir", default="")
+    p_cfi.set_defaults(func=cmd_cf_install)
+
+    p_cfp = sub.add_parser("cf-project")
+    p_cfp.add_argument("--mod-id", required=True)
+    p_cfp.set_defaults(func=cmd_cf_project)
+
+    p_cfmp = sub.add_parser("cf-modpack-install")
+    p_cfmp.add_argument("--pack-id", required=True)
+    p_cfmp.add_argument("--file-id", default="")
+    p_cfmp.add_argument("--mc-dir", default="")
+    p_cfmp.set_defaults(func=cmd_cf_modpack_install)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

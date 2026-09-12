@@ -1,0 +1,13 @@
+{
+  "name": "Minecraft Launcher",
+  "version": "1.0.0",
+  "entry": "minecraft-launcher",
+  "type": "Minecraft",
+  "description": "Minecraft Java: MS/offline accounts, versions, Adoptium Java 17/21/25, instances, mods-ready.",
+  "capabilities": ["auth", "auth-config", "offline", "versions", "install", "loaders", "launch", "stop", "status", "setup", "java", "mods", "modrinth"],
+  "protocol": {
+    "stdout": "JSON Lines (streaming) or single JSON",
+    "exitCodes": { "0": "ok", "2": "usage error", "3": "operation failed", "4": "auth error", "5": "backend missing" }
+  },
+  "source": "Matts-lab69/CorkyTux-Plugins"
+}

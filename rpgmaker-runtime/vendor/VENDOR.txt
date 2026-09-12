@@ -1,0 +1,1 @@
+d28845f2a6aa7053a117b0d2ee71dae214b45f38 2026-09-08 fix(security)!: harden game and runtime trust boundaries

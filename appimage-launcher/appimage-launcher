@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""
+appimage-launcher — CorkyTux plugin
+
+Manages .AppImage files: scan, integrate into ~/Applications +
+~/.local/share/applications, and launch detached.
+
+Protocol: single JSON document on stdout per invocation.
+Exit codes: 0 ok, 2 usage error, 3 operation failed.
+No third-party dependencies: stdlib only.
+"""
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+APPS_DIR = Path.home() / "Applications"
+DESKTOP_DIR = Path.home() / ".local" / "share" / "applications"
+ICONS_DIR = Path.home() / ".local" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+
+
+def emit(payload: dict, exit_code: int = 0):
+    print(json.dumps(payload))
+    sys.exit(exit_code)
+
+
+def fail(message: str, exit_code: int = 3, **extra):
+    emit({"ok": False, "type": "error", "message": message, **extra}, exit_code)
+
+
+def is_elf(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def slug_of(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    return slug or "app"
+
+
+def desktop_guess(path: Path) -> dict:
+    name = path.stem
+    for suffix in (".AppImage", ".appimage"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    name = name.replace("_", " ").replace("-", " ").strip() or path.stem
+    version = ""
+    m = re.search(r"(\d+\.\d+[\.\d]*(-\w+)?)", path.name)
+    if m:
+        version = m.group(1)
+    return {"app_name": name, "version": version}
+
+
+def try_desktop_entry(path: Path) -> dict:
+    try:
+        proc = subprocess.run(
+            ["strings", str(path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    out: dict = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("Name=") and "name" not in out and len(line) < 120:
+            out["name"] = line[5:].strip()
+        elif line.startswith("Icon=") and "icon" not in out and len(line) < 120:
+            out["icon"] = line[5:].strip()
+        elif line.startswith("Version=") and "xversion" not in out and len(line) < 40:
+            out["xversion"] = line[8:].strip()
+        if len(out) >= 3:
+            break
+    return out
+
+
+def cmd_scan(args):
+    if not args:
+        fail("scan requires a path", exit_code=2)
+    path = Path(args[0]).expanduser()
+    if not path.exists() or not path.is_file():
+        fail(f"not a file: {path}", exit_code=2)
+    resolved = path.resolve()
+    elf = is_elf(resolved)
+    st = resolved.stat()
+    executable = bool(st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+    guess = desktop_guess(resolved)
+    entry = try_desktop_entry(resolved)
+    emit({
+        "ok": True,
+        "type": "done",
+        "path": str(resolved),
+        "valid": elf,
+        "app_name": entry.get("name") or guess["app_name"],
+        "version": entry.get("xversion") or guess["version"],
+        "icon_hint": entry.get("icon", ""),
+        "executable_bit": executable,
+        "size": st.st_size,
+    })
+
+
+def cmd_status(_args):
+    integrated = 0
+    if DESKTOP_DIR.is_dir():
+        for f in DESKTOP_DIR.glob("appimage-*.desktop"):
+            try:
+                if ".AppImage" in f.read_text() or ".appimage" in f.read_text():
+                    integrated += 1
+            except OSError:
+                pass
+    emit({
+        "ok": True,
+        "type": "done",
+        "apps_dir": str(APPS_DIR),
+        "apps_dir_exists": APPS_DIR.is_dir(),
+        "desktop_dir": str(DESKTOP_DIR),
+        "integrated_count": integrated,
+        "updater_available": shutil.which("appimageupdatetool") is not None,
+    })
+
+
+def sniff_ext(data: bytes) -> str:
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    head = data[:200].lstrip().lower()
+    if head.startswith(b"<svg") or head.startswith(b"<?xml"):
+        return "svg"
+    return "png"
+
+
+def extract_icon_to(src: Path, dest: Path) -> str:
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmpd = Path(os.environ.get("TMPDIR", "/tmp")) / f"corky-appicon-{os.getpid()}"
+        if tmpd.exists():
+            shutil.rmtree(tmpd, ignore_errors=True)
+        tmpd.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            [str(src), "--appimage-extract", ".DirIcon"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=40,
+            cwd=str(tmpd),
+        )
+        cand = tmpd / "squashfs-root" / ".DirIcon"
+        if proc.returncode != 0 or not cand.is_file():
+            shutil.rmtree(tmpd, ignore_errors=True)
+            return ""
+        data = cand.read_bytes()
+        if len(data) < 100:
+            shutil.rmtree(tmpd, ignore_errors=True)
+            return ""
+        final = dest.with_suffix(f".{sniff_ext(data)}")
+        final.write_bytes(data)
+        shutil.rmtree(tmpd, ignore_errors=True)
+        return str(final)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def try_extract_icon(src: Path, slug: str) -> str:
+    return extract_icon_to(src, ICONS_DIR / f"appimage-{slug}.png")
+
+
+def cmd_icon(args):
+    if not args or args[0] in ("-h", "--help"):
+        fail("usage: icon <AppImage> --out <file>", exit_code=2)
+    src = Path(args[0]).expanduser().resolve()
+    if not src.is_file():
+        fail(f"not a file: {src}", exit_code=2)
+    if not is_elf(src):
+        fail("not an ELF binary", exit_code=3)
+    out = None
+    if "--out" in args:
+        i = args.index("--out")
+        if i + 1 < len(args):
+            out = Path(args[i + 1]).expanduser()
+    if out is None:
+        fail("usage: icon <AppImage> --out <file>", exit_code=2)
+    got = extract_icon_to(src, out)
+    if not got:
+        fail("could not extract .DirIcon from AppImage", exit_code=3)
+    guess = desktop_guess(src)
+    entry = try_desktop_entry(src)
+    emit({
+        "ok": True,
+        "type": "done",
+        "path": str(src),
+        "icon": got,
+        "app_name": entry.get("name") or guess["app_name"],
+    })
+
+
+def cmd_integrate(args):
+    if not args:
+        fail("integrate requires a path", exit_code=2)
+    move = "--move" in args[1:]
+    src = Path(args[0]).expanduser().resolve()
+    if not src.is_file():
+        fail(f"not a file: {src}", exit_code=2)
+    if not is_elf(src):
+        fail("not an ELF binary, refusing to integrate", exit_code=3)
+    APPS_DIR.mkdir(parents=True, exist_ok=True)
+    DESKTOP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        src.chmod(src.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as e:
+        fail(f"chmod +x failed: {e}", exit_code=3)
+    dest = APPS_DIR / src.name
+    try:
+        if src != dest:
+            if move:
+                shutil.move(str(src), str(dest))
+            else:
+                shutil.copy2(str(src), str(dest))
+                dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as e:
+        fail(f"copy to Applications failed: {e}", exit_code=3)
+    guess = desktop_guess(dest)
+    entry = try_desktop_entry(dest)
+    app_name = entry.get("name") or guess["app_name"]
+    slug = slug_of(dest.stem)
+    icon_path = try_extract_icon(dest, slug)
+    desktop_file = DESKTOP_DIR / f"appimage-{slug}.desktop"
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={app_name}",
+        f"Exec=\"{dest}\" %U",
+    ]
+    if icon_path:
+        lines.append(f"Icon={icon_path}")
+    lines += ["Terminal=false", "Categories=Game;", ""]
+    try:
+        desktop_file.write_text("\n".join(lines))
+    except OSError as e:
+        fail(f"desktop file failed: {e}", exit_code=3)
+    emit({
+        "ok": True,
+        "type": "done",
+        "installed_path": str(dest),
+        "desktop_file": str(desktop_file),
+        "icon": icon_path,
+        "app_name": app_name,
+    })
+
+
+def cmd_remove(args):
+    if not args:
+        fail("remove requires an installed path or slug", exit_code=2)
+    target = args[0]
+    slug = slug_of(Path(target).stem)
+    desktop_file = DESKTOP_DIR / f"appimage-{slug}.desktop"
+    removed = []
+    if desktop_file.exists():
+        desktop_file.unlink()
+        removed.append(str(desktop_file))
+    icon = ICONS_DIR / f"appimage-{slug}.png"
+    if icon.exists():
+        icon.unlink()
+        removed.append(str(icon))
+    emit({"ok": True, "type": "done", "removed": removed})
+
+
+def cmd_run(args):
+    if not args:
+        fail("run requires a path", exit_code=2)
+    path = Path(args[0]).expanduser().resolve()
+    extra = args[1:]
+    if not path.is_file():
+        fail(f"not a file: {path}", exit_code=2)
+    if not is_elf(path):
+        fail("not an AppImage (ELF) binary", exit_code=3)
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    except OSError:
+        pass
+    try:
+        proc = subprocess.Popen(
+            [str(path), *extra],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        fail(f"launch failed: {e}", exit_code=3)
+    emit({"ok": True, "type": "launching", "path": str(path), "pid": proc.pid})
+
+
+COMMANDS = {
+    "scan": cmd_scan,
+    "status": cmd_status,
+    "integrate": cmd_integrate,
+    "remove": cmd_remove,
+    "run": cmd_run,
+    "icon": cmd_icon,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        fail(f"usage: appimage-launcher <{'|'.join(COMMANDS)}> [args...]", exit_code=2)
+    COMMANDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

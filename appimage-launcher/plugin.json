@@ -1,0 +1,13 @@
+{
+  "name": "AppImage Launcher",
+  "version": "1.0.0",
+  "entry": "appimage-launcher",
+  "type": "AppImage",
+  "description": "Run and manage .AppImage files: scan, integrate into ~/Applications, launch detached.",
+  "capabilities": ["scan", "status", "integrate", "remove", "run", "icon"],
+  "protocol": {
+    "stdout": "single JSON document per invocation",
+    "exitCodes": { "0": "ok", "2": "usage/invalid path", "3": "operation failed" }
+  },
+  "source": "Matts-lab69/CorkyTux-Plugins"
+}

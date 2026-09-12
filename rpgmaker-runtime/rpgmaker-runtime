@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""
+rpgmaker-runtime — CorkyTux plugin
+
+Thin wrapper around box-rpg (christvh/box-rpg), a Python 3.14+ CLI launcher
+for RPG Maker MV/MZ (NW.js) and RPG Maker 2000/2003 (EasyRPG Player).
+
+This plugin deliberately does NOT reimplement detection, sandboxing, or
+runtime management: box-rpg already resolves paths through file descriptors
+(TOCTOU-safe), restricts launches to explicitly allowed roots, and manages
+NW.js/EasyRPG Player versions itself. Reimplementing that here would be a
+strict downgrade in safety.
+
+`scan` prefers `box-rpg inspect` (authoritative) when box-rpg is installed
+and falls back to a local signature check used only as a UI hint.
+The real validation always happens inside box-rpg at launch time.
+
+Protocol: single JSON document on stdout. Exit codes: 0 ok, 2 usage error, 3 failure.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+BOX_RPG = "box-rpg"
+BOX_REPO = "https://gitlab.com/christvh/box-rpg"
+
+PLUGIN_DIR = Path(__file__).resolve().parent
+VENDOR_SRC = PLUGIN_DIR / "vendor" / "box-rpg-src"
+VENDOR_FILE = PLUGIN_DIR / "vendor" / "VENDOR.txt"
+
+_RUNNER = "import sys; from box.cli.main import main; sys.exit(main())"
+
+
+def box_bin() -> str | None:
+    """System box-rpg location: ~/.local/bin first (pip --user), then PATH."""
+    local = Path.home() / ".local" / "bin" / BOX_RPG
+    if local.is_file() and os.access(local, os.X_OK):
+        return str(local)
+    return shutil.which(BOX_RPG)
+
+
+def box_mode() -> str:
+    if (VENDOR_SRC / "box" / "cli" / "main.py").is_file():
+        return "bundled"
+    if box_bin() is not None:
+        return "system"
+    return "missing"
+
+
+def box_vendor_commit() -> str:
+    try:
+        return VENDOR_FILE.read_text().strip().split()[0][:12]
+    except OSError:
+        return ""
+
+
+def corky_xdg() -> tuple[Path, Path]:
+    home = Path.home()
+    return (home / ".config" / "CorkyTux", home / ".cache" / "CorkyTux")
+
+
+def migrate_box_paths():
+    """One-time move of box-rpg's own dirs under CorkyTux folders."""
+    home = Path.home()
+    cfg_dst_base, cache_dst_base = corky_xdg()
+    try:
+        old_cfg = home / ".config" / "box-rpg"
+        new_cfg = cfg_dst_base / "box-rpg"
+        if old_cfg.is_dir() and not new_cfg.exists():
+            cfg_dst_base.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_cfg), str(new_cfg))
+        old_cache = home / ".cache" / "box-rpg"
+        new_cache = cache_dst_base / "box-rpg"
+        if old_cache.is_dir() and not new_cache.exists():
+            cache_dst_base.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_cache), str(new_cache))
+    except OSError:
+        pass
+
+
+def box_env() -> dict:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    cfg_base, cache_base = corky_xdg()
+    env["XDG_CONFIG_HOME"] = str(cfg_base)
+    env["XDG_CACHE_HOME"] = str(cache_base)
+    if box_mode() == "bundled":
+        prev = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(VENDOR_SRC) + (os.pathsep + prev if prev else "")
+    return env
+
+
+def box_argv(args: list[str]) -> list[str]:
+    if box_mode() == "bundled":
+        return [sys.executable, "-c", _RUNNER, *args]
+    found = box_bin()
+    if found is None:
+        fail(
+            "box-rpg not found — press Install box-rpg "
+            "(https://gitlab.com/christvh/box-rpg, requires Python 3.14+)",
+            exit_code=3,
+        )
+    return [found, *args]
+
+ENGINE_MAP = {
+    "rpg-maker-mv": ("mv_mz", "mv"),
+    "rpg-maker-mz": ("mv_mz", "mz"),
+    "rpg-maker-2000-2003": ("2k3", None),
+}
+
+
+# ---------- output helpers ----------
+
+def emit(payload: dict, exit_code: int = 0):
+    print(json.dumps(payload))
+    sys.exit(exit_code)
+
+
+def fail(message: str, exit_code: int = 3, **extra):
+    emit({"ok": False, "type": "error", "message": message, **extra}, exit_code)
+
+
+def run_box_rpg(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    """Invoke box-rpg with no stdin, so it never blocks waiting for a TTY prompt."""
+    try:
+        return subprocess.run(
+            box_argv(args),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=box_env(),
+        )
+    except FileNotFoundError:
+        fail(
+            "box-rpg not found — press Install box-rpg "
+            "(https://gitlab.com/christvh/box-rpg, requires Python 3.14+)",
+            exit_code=3,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"box-rpg timed out: {' '.join(args)}", exit_code=3)
+
+
+# ---------- lightweight local detection (UI hint only) ----------
+
+def detect_engine_hint(path: Path) -> dict:
+    """
+    Non-authoritative signature check. MZ is checked before MV on purpose:
+    an MZ project also ships package.json, and naive MV-first checks
+    misclassify it. XP/VX/VX Ace are detected only to explain why they
+    are unsupported (mkxp-z ships no portable build).
+    """
+    if not path.exists() or not path.is_dir():
+        return {"engine": "unknown", "reason": "path does not exist or is not a directory"}
+
+    # RPG Maker MZ first: index.html + js/plugins.js + js/rmmz_core.js + data/ + package.json
+    if (
+        (path / "index.html").is_file()
+        and (path / "js" / "plugins.js").is_file()
+        and (path / "js" / "rmmz_core.js").is_file()
+        and (path / "data").is_dir()
+        and (path / "package.json").is_file()
+    ):
+        return {"engine": "mv_mz", "variant": "mz"}
+
+    # RPG Maker MV: www/index.html + www/js/plugins.js + package.json (no rmmz_core)
+    if (
+        (path / "www" / "index.html").is_file()
+        and (path / "www" / "js" / "plugins.js").is_file()
+        and (path / "package.json").is_file()
+        and not (path / "www" / "js" / "rmmz_core.js").is_file()
+    ):
+        return {"engine": "mv_mz", "variant": "mv"}
+
+    # RPG Maker 2000/2003: RPG_RT.ini + RPG_RT.ldb + RPG_RT.lmt
+    if all((path / name).is_file() for name in ("RPG_RT.ini", "RPG_RT.ldb", "RPG_RT.lmt")):
+        return {"engine": "2k3"}
+
+    # RPG Maker XP/VX/VX Ace: unsupported (no portable Linux runtime)
+    if (
+        (path / "Game.ini").is_file()
+        and (path / "Data").is_dir()
+        and any((path / "Data" / n).is_file() for n in ("Scripts.rxdata", "Scripts.rvdata", "Scripts.rvdata2"))
+    ):
+        return {"engine": "unsupported", "reason": "XP/VX/VX Ace need mkxp-z (no portable build)"}
+
+    return {"engine": "unknown"}
+
+
+def inspect_authoritative(path: Path) -> dict | None:
+    """Ask box-rpg itself. Returns None when unavailable or inconclusive."""
+    if box_mode() == "missing":
+        return None
+    try:
+        proc = subprocess.run(
+            box_argv(["inspect", str(path)]),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=box_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    engine = title = entrypoint = ""
+    for line in proc.stdout.splitlines():
+        m = re.match(r"^\s*([^:]{1,30}):\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        key, val = m.group(1).strip().lower(), m.group(2).strip()
+        if key == "engine":
+            engine = val
+        elif key == "title":
+            title = val
+        elif key == "entrypoint":
+            entrypoint = val
+    if engine not in ENGINE_MAP:
+        return None
+    eng, variant = ENGINE_MAP[engine]
+    out: dict = {"engine": eng, "authoritative": True}
+    if variant:
+        out["variant"] = variant
+    if title and title != "(unknown)":
+        out["title"] = title
+    if entrypoint and entrypoint != "(not applicable)":
+        out["entrypoint"] = entrypoint
+    return out
+
+
+# ---------- commands ----------
+
+def cmd_scan(args):
+    if not args:
+        fail("scan requires a path", exit_code=2)
+    path = Path(args[0]).expanduser()
+    if not path.exists():
+        fail(f"path does not exist: {path}", exit_code=2)
+    resolved = path.resolve() if path.exists() else path
+    auth = inspect_authoritative(resolved)
+    if auth is not None:
+        emit({"ok": True, "type": "done", "path": str(resolved), **auth})
+    hint = detect_engine_hint(resolved)
+    emit({
+        "ok": True,
+        "type": "done",
+        "path": str(resolved),
+        **hint,
+        "authoritative": False,
+        "box_rpg_installed": bool(shutil.which(BOX_RPG) or (Path.home() / ".local" / "bin" / BOX_RPG).is_file()),
+    })
+
+
+def cmd_diagnose(args):
+    if not args:
+        fail("diagnose requires a path", exit_code=2)
+    path = Path(args[0]).expanduser().resolve()
+    runtime = None
+    if "--runtime" in args[1:]:
+        i = args.index("--runtime")
+        if i + 1 < len(args):
+            runtime = args[i + 1]
+    cmd = ["diagnose", str(path)]
+    if runtime:
+        cmd += ["--runtime", runtime]
+    result = run_box_rpg(cmd, timeout=120)
+    if result.returncode != 0:
+        fail(result.stderr.strip() or result.stdout.strip() or "diagnose failed", exit_code=3)
+    emit({"ok": True, "type": "done", "path": str(path), "report": result.stdout.strip()})
+
+
+def cmd_status(args):
+    mode = box_mode()
+    if mode == "missing":
+        emit({"ok": True, "type": "done", "box_rpg_installed": False, "nwjs_runtimes": [], "easyrpg_runtimes": []})
+        return
+
+    nwjs = run_box_rpg(["runtime", "nwjs", "list"])
+    easyrpg = run_box_rpg(["runtime", "easyrpg", "list"])
+    emit({
+        "ok": True,
+        "type": "done",
+        "box_rpg_installed": True,
+        "box_rpg_mode": mode,
+        "box_rpg_commit": box_vendor_commit() if mode == "bundled" else "",
+        "box_rpg_path": box_bin() or "bundled",
+        "nwjs_runtimes": _parse_runtime_lines(nwjs.stdout),
+        "easyrpg_runtimes": _parse_runtime_lines(easyrpg.stdout),
+    })
+
+
+def _parse_runtime_lines(stdout: str) -> list[str]:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    # box-rpg prints "no X runtimes installed" as a single line when empty
+    if len(lines) == 1 and "installed" in lines[0] and lines[0].startswith("no "):
+        return []
+    return lines
+
+
+def cmd_install_box():
+    if sys.version_info < (3, 14):
+        fail(f"box-rpg needs Python 3.14+, found {sys.version.split()[0]}", exit_code=3)
+    if not shutil.which("git"):
+        fail("git not found — install git first", exit_code=3)
+    cache = Path.home() / ".cache" / "CorkyTux" / "box-rpg-upstream"
+    try:
+        if (cache / ".git").is_dir():
+            fetch = subprocess.run(
+                ["git", "-C", str(cache), "fetch", "--depth", "1", "origin"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+                env=box_env(),
+            )
+            if fetch.returncode == 0:
+                subprocess.run(
+                    ["git", "-C", str(cache), "reset", "--hard", "FETCH_HEAD"],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+                    env=box_env(),
+                )
+        else:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            if cache.exists():
+                shutil.rmtree(cache, ignore_errors=True)
+            clone = subprocess.run(
+                ["git", "clone", "--depth", "1", BOX_REPO, str(cache)],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+                env=box_env(),
+            )
+            if clone.returncode != 0:
+                fail(f"clone failed: {clone.stderr.strip()}", exit_code=3)
+        src = cache / "src"
+        if not (src / "box" / "cli" / "main.py").is_file():
+            fail("cloned repo has no usable box-rpg sources", exit_code=3)
+        dest = PLUGIN_DIR / "vendor" / "box-rpg-src"
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__"))
+        lic = cache / "LICENSE"
+        if lic.is_file():
+            shutil.copy(lic, PLUGIN_DIR / "vendor" / "BOX-RPG-LICENSE")
+        rev = subprocess.run(
+            ["git", "-C", str(cache), "log", "-1", "--format=%H %ad %s", "--date=short"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+            env=box_env(),
+        )
+        (PLUGIN_DIR / "vendor" / "VENDOR.txt").write_text(
+            (rev.stdout.strip() or "unknown") + "\n")
+    except subprocess.TimeoutExpired:
+        fail("box-rpg refresh timed out", exit_code=3)
+    except OSError as e:
+        fail(f"box-rpg refresh failed: {e}", exit_code=3)
+    if box_mode() != "bundled":
+        fail("refresh finished but the bundled copy is unusable", exit_code=3)
+    emit({"ok": True, "type": "done", "installed": True,
+          "mode": "bundled", "commit": box_vendor_commit()})
+
+
+def cmd_install(args):
+    """
+    install check
+      -> report whether box-rpg is usable (bundled copy or system install)
+    install box
+      -> refresh the bundled box-rpg copy from upstream (explicit user action).
+         Requires git + network. No pip, no root, no system changes.
+    install runtime nwjs [VERSION]
+    install runtime easyrpg [VERSION]
+      -> installs a runtime via box-rpg's own non-interactive command.
+         VERSION omitted: picks the first (latest) version box-rpg reports
+         as available from the official release channel.
+    """
+    if not args:
+        fail("usage: install check | install box | install runtime <nwjs|easyrpg> [VERSION]", exit_code=2)
+
+    if args[0] == "check":
+        mode = box_mode()
+        emit({"ok": True, "type": "done", "installed": mode != "missing",
+              "mode": mode, "path": box_bin() or "bundled",
+              "commit": box_vendor_commit() if mode == "bundled" else ""})
+
+    if args[0] == "box":
+        cmd_install_box()
+        return
+
+    if args[0] != "runtime" or len(args) < 2 or args[1] not in ("nwjs", "easyrpg"):
+        fail("usage: install check | install box | install runtime <nwjs|easyrpg> [VERSION]", exit_code=2)
+
+    kind = args[1]
+    version = args[2] if len(args) > 2 else None
+
+    if version is None:
+        available = run_box_rpg(["runtime", kind, "available", "--page", "1"])
+        if available.returncode != 0:
+            fail(f"could not query available {kind} versions: {available.stderr.strip()}", exit_code=3)
+        versions = re.findall(r"^\s*\d+\.\s+(\S+)\s*$", available.stdout, flags=re.MULTILINE)
+        if not versions:
+            fail(f"no available {kind} versions found (page 1)", exit_code=3)
+        version = versions[0]
+
+    result = run_box_rpg(["runtime", kind, "install", version], timeout=600)
+    if result.returncode != 0:
+        fail(f"install failed: {result.stderr.strip() or result.stdout.strip()}", exit_code=3)
+    emit({"ok": True, "type": "done", "kind": kind, "installed_version": version})
+
+
+def cmd_run(args):
+    if not args:
+        fail("run requires a game path", exit_code=2)
+    raw = args[0]
+    runtime = None
+    if "--runtime" in args[1:]:
+        i = args.index("--runtime")
+        if i + 1 < len(args):
+            runtime = args[i + 1]
+    path = Path(raw).expanduser().resolve()
+
+    if box_mode() == "missing":
+        fail(
+            "box-rpg not available — run 'install box' to fetch the bundled copy, "
+            "see https://gitlab.com/christvh/box-rpg",
+            exit_code=3,
+        )
+
+    # Idempotent: safe to call on every run, box-rpg dedups internally.
+    authorize = run_box_rpg(["config", "set", "allowed-game-root", str(path)])
+    if authorize.returncode != 0:
+        fail(f"could not authorize game root: {authorize.stderr.strip()}", exit_code=3)
+
+    # box-rpg blocks until the game process exits — spawn detached so this
+    # plugin call returns immediately instead of blocking for the play session.
+    launch_cmd = box_argv(["launch", str(path)])
+    if runtime:
+        launch_cmd += ["--runtime", runtime]
+    try:
+        subprocess.Popen(
+            launch_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=box_env(),
+        )
+    except OSError as e:
+        fail(f"failed to spawn box-rpg launch: {e}", exit_code=3)
+
+    emit({"ok": True, "type": "launching", "path": str(path), "runtime": runtime})
+
+
+# ---------- entry point ----------
+
+COMMANDS = {
+    "scan": cmd_scan,
+    "diagnose": cmd_diagnose,
+    "status": cmd_status,
+    "install": cmd_install,
+    "run": cmd_run,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        fail(f"usage: rpgmaker-runtime <{'|'.join(COMMANDS)}> [args...]", exit_code=2)
+    migrate_box_paths()
+    COMMANDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

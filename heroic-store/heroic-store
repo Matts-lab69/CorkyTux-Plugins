@@ -1,0 +1,1244 @@
+#!/usr/bin/env python3
+"""CorkyTux heroic-store plugin: Epic Games + GOG via legendary/gogdl.
+
+Same pattern Heroic itself uses: shell out to these binaries, parse
+their output, stream progress as JSON lines. Games live in CorkyTux's
+native library (no separate store library); EAC/BattlEye runtime flags
+come from Heroic's per-game config on scan.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import webbrowser
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "CorkyTux" / "plugins" / "heroic-store"
+HEROIC_DIR = Path.home() / ".config" / "heroic"
+# Independent from Heroic: own legendary session (~/.config/legendary)
+# and own binaries (PATH or CONFIG_DIR/bin via `setup`). Nothing is
+# read from or written to Heroic's dirs except heroic-scan (import) and
+# the EAC/BattlEye runtime paths.
+HEROIC_TOOLS = HEROIC_DIR / "tools" / "runtimes"
+EAC_RUNTIME = HEROIC_TOOLS / "eac_runtime"
+BE_RUNTIME = HEROIC_TOOLS / "battleye_runtime"
+INSTALLS_JSON = CONFIG_DIR / "installs.json"
+GOG_TOKEN_JSON = CONFIG_DIR / "gog_token.json"
+
+EPIC_CLIENT_ID = "34a02cf8f4414e29b15921876da36f9a"
+GOG_CLIENT_ID = "46899977096215655"
+GOG_LOGIN_URL = ("https://auth.gog.com/auth?client_id=46899977096215655&"
+                 "redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&"
+                 "response_type=code&layout=client2")
+
+
+def _find_bin(name: str):
+    found = shutil.which(name)
+    if found:
+        return found
+    cand = CONFIG_DIR / "bin" / name
+    if cand.is_file():
+        return str(cand)
+    return str(cand)
+
+
+LEGENDARY_BIN = _find_bin("legendary")
+GOGDL_BIN = _find_bin("gogdl")
+
+
+def emit(event: dict):
+    print(json.dumps(event), flush=True)
+
+
+def die(code: int, message: str):
+    emit({"type": "error", "message": message})
+    sys.exit(code)
+
+
+def _require_binary(path: str, name: str):
+    if not Path(path).exists() and shutil.which(name) is None:
+        die(5, f"{name} not found. Run `setup` to download it, or place it at {path}")
+
+
+def cmd_setup(_args):
+    import platform as _plat
+    import urllib.request
+    if _plat.machine() not in ("x86_64", "AMD64"):
+        die(2, f"Auto-download only supports x86_64 (this is {_plat.machine()}). Install legendary/gogdl manually.")
+    bindir = CONFIG_DIR / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    got, failed = [], []
+    jobs = [
+        ("legendary", bindir / "legendary",
+         "https://github.com/legendary-gl/legendary/releases/latest/download/legendary_linux_x64"),
+        ("gogdl", bindir / "gogdl",
+         "https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/latest/download/gogdl_linux_x86_64"),
+    ]
+    for name, dest, url in jobs:
+        if dest.is_file() or shutil.which(name):
+            got.append(f"{name} (already present)")
+            continue
+        emit({"type": "progress", "stage": f"downloading-{name}", "percent": None})
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+            with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            os.chmod(dest, 0o755)
+            got.append(name)
+        except Exception as e:
+            if dest.exists():
+                dest.unlink(missing_ok=True)
+            failed.append(f"{name}: {e}")
+    if failed and not got:
+        die(3, "Setup failed: " + "; ".join(failed))
+    emit({"type": "done", "ok": True, "installed": got, "failed": failed})
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _read_installs():
+    data = _read_json(INSTALLS_JSON)
+    return data if isinstance(data, dict) else {}
+
+
+def _write_installs(data: dict):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    INSTALLS_JSON.write_text(json.dumps(data, indent=2))
+
+
+def _epic_account_name():
+    try:
+        udata = json.loads((Path.home() / ".config" / "legendary" / "user.json").read_text())
+        if udata.get("displayName"):
+            return str(udata["displayName"])
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def _gog_account_name():
+    access = _gog_access_token()
+    if not access:
+        return ""
+    try:
+        import urllib.request
+        req = urllib.request.Request("https://embed.gog.com/userData.json",
+                                     headers={"Authorization": f"Bearer {access}",
+                                              "User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+        return str(data.get("username", ""))
+    except Exception:
+        return ""
+
+
+def cmd_status(_args):
+    epic_bin = Path(LEGENDARY_BIN).exists() or shutil.which("legendary") is not None
+    gog_bin = Path(GOGDL_BIN).exists() or shutil.which("gogdl") is not None
+    epic_logged = False
+    epic_name = ""
+    if epic_bin:
+        try:
+            proc = subprocess.run([LEGENDARY_BIN, "status"], capture_output=True,
+                                  text=True, timeout=30)
+            epic_logged = "not logged in" not in (proc.stdout + proc.stderr).lower()
+        except (OSError, subprocess.TimeoutExpired):
+            epic_logged = False
+        if epic_logged:
+            epic_name = _epic_account_name()
+    gog_logged = False
+    gog_name = ""
+    tok = _read_json(GOG_TOKEN_JSON)
+    if isinstance(tok, dict) and tok.get("refresh_token"):
+        gog_logged = True
+        gog_name = _gog_account_name()
+        if not gog_name:
+            gog_logged = False
+    emit({"type": "done", "ok": True,
+          "bins": {"epic": epic_bin, "gog": gog_bin},
+          "logged": {"epic": epic_logged, "gog": gog_logged},
+          "accounts": {"epic": epic_name, "gog": gog_name},
+          "heroic": {"installed": HEROIC_DIR.is_dir(),
+                     "eac_runtime": EAC_RUNTIME.is_dir(),
+                     "battleye_runtime": BE_RUNTIME.is_dir()}})
+
+
+def cmd_logout(args):
+    if args.store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        subprocess.run([LEGENDARY_BIN, "auth", "--delete"],
+                       capture_output=True, timeout=60)
+        emit({"type": "done", "ok": True, "store": "epic"})
+        return
+    try:
+        GOG_TOKEN_JSON.unlink(missing_ok=True)
+    except OSError:
+        pass
+    emit({"type": "done", "ok": True, "store": "gog"})
+
+
+def _epic_logged_in() -> str:
+    """Account name or '' — legendary 0.21 exits 0 even on failed login,
+    so the return code is useless; verify the session for real."""
+    try:
+        proc = subprocess.run([LEGENDARY_BIN, "status"], capture_output=True,
+                              text=True, timeout=30)
+        for line in (proc.stdout or "").splitlines():
+            if line.startswith("Epic account:"):
+                name = line.split(":", 1)[1].strip()
+                return "" if "not logged in" in name.lower() else name
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def _epic_do_auth(args_list, timeout=120) -> str:
+    try:
+        proc = subprocess.run(args_list, capture_output=True, text=True,
+                              timeout=timeout)
+        return (proc.stderr or proc.stdout or "")
+    except subprocess.TimeoutExpired:
+        return "timed out"
+
+
+def cmd_auth(args):
+    store = args.store
+    if store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        if args.code:
+            code = args.code.strip().strip('"').strip("'")
+            _epic_do_auth([LEGENDARY_BIN, "auth", "--code", code])
+            name = _epic_logged_in()
+            if not name:
+                # Fallback: pasted value may be a session id (sid).
+                _epic_do_auth([LEGENDARY_BIN, "auth", "--sid", code])
+                name = _epic_logged_in()
+            if not name:
+                die(4, "Epic login failed: the code/sid was rejected. Get a fresh code (it expires fast) and try again.")
+            emit({"type": "done", "ok": True, "store": "epic", "account": name})
+            return
+        import urllib.parse
+        redirect = (f"https://www.epicgames.com/id/api/redirect?clientId={EPIC_CLIENT_ID}"
+                    "&responseType=code")
+        # Login-first: Epic only fills authorizationCode when the session
+        # already exists. Going straight to the redirect URL with no
+        # session returns nulls, so force the login screen first — after
+        # login Epic lands on the JSON with the codes filled in.
+        url = ("https://www.epicgames.com/id/login?redirectUrl="
+               + urllib.parse.quote(redirect, safe=""))
+        webbrowser.open(url)
+        emit({"type": "auth_url", "store": "epic", "url": url,
+              "instructions": "1) Log in to Epic (solve any captcha, you must see your avatar). 2) You land on JSON: copy 'authorizationCode' FAST (expires in ~1 min). 3) If it still shows null: turn OFF tracking protection/adblock for epicgames.com and retry, or allow all epicgames.com cookies."})
+        return
+    _require_binary(GOGDL_BIN, "gogdl")
+    if args.code:
+        proc = subprocess.run([GOGDL_BIN, "auth", "--code", args.code],
+                              capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            die(4, f"gogdl auth failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
+        _gog_exchange(args.code)
+        emit({"type": "done", "ok": True, "store": "gog"})
+        return
+    webbrowser.open(GOG_LOGIN_URL)
+    emit({"type": "auth_url", "store": "gog", "url": GOG_LOGIN_URL,
+          "instructions": "Log in, copy the 'code' param from the final URL, paste it below."})
+
+
+def _gog_exchange(code: str):
+    import urllib.request
+    import urllib.parse
+    try:
+        data = urllib.parse.urlencode({
+            "client_id": GOG_CLIENT_ID,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "https://embed.gog.com/on_login_success?origin=client",
+        }).encode()
+        req = urllib.request.Request("https://auth.gog.com/token", data=data,
+                                     headers={"User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            tok = json.loads(resp.read().decode())
+        if tok.get("refresh_token"):
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            GOG_TOKEN_JSON.write_text(json.dumps({"refresh_token": tok["refresh_token"]}))
+            try:
+                os.chmod(GOG_TOKEN_JSON, 0o600)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _gog_access_token():
+    import urllib.request
+    import urllib.parse
+    tok = _read_json(GOG_TOKEN_JSON)
+    refresh = (tok or {}).get("refresh_token", "")
+    if not refresh:
+        return ""
+    try:
+        data = urllib.parse.urlencode({
+            "client_id": GOG_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+        }).encode()
+        req = urllib.request.Request("https://auth.gog.com/token", data=data,
+                                     headers={"User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode()).get("access_token", "")
+    except Exception:
+        return ""
+
+
+def _epic_cover(game: dict) -> str:
+    meta = game.get("metadata") or {}
+    imgs = meta.get("keyImages") or []
+    prefer = ("DieselGameBoxTall", "DieselGameBox", "OfferImageWide",
+              "DieselStoreFrontWide", "Thumbnail")
+    by_type = {}
+    for im in imgs:
+        by_type.setdefault(im.get("type", ""), im.get("url", ""))
+    for t in prefer:
+        if by_type.get(t):
+            return by_type[t]
+    for im in imgs:
+        if im.get("url"):
+            return im["url"]
+    return ""
+
+
+def _epic_desc(game: dict) -> str:
+    meta = game.get("metadata") or {}
+    return str(meta.get("description") or meta.get("shortDescription") or "")
+
+
+def cmd_game_info(args):
+    store = args.store
+    if store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        try:
+            proc = subprocess.run([LEGENDARY_BIN, "list", "--json"],
+                                  capture_output=True, text=True, timeout=120)
+            games = json.loads(proc.stdout or "[]")
+        except (ValueError, subprocess.TimeoutExpired, OSError) as e:
+            die(3, f"legendary list failed: {e}")
+        g = next((x for x in games if x.get("app_name") == args.app_id), None)
+        if not g:
+            die(2, "Game not in Epic library")
+        meta = g.get("metadata") or {}
+        emit({"type": "done", "ok": True, "store": "epic", "info": {
+            "app_id": g.get("app_name"), "title": g.get("app_title"),
+            "version": g.get("app_version", ""),
+            "cover": _epic_cover(g),
+            "description": _epic_desc(g) or str(meta.get("longDescription") or "")[:1500],
+            "developer": str(meta.get("developer") or ""),
+            "store_url": f"https://store.epicgames.com/en-US/p/{(meta.get('namespace') or '')}",
+        }})
+        return
+    access = _gog_access_token()
+    if not access:
+        die(4, "GOG not logged in.")
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://embed.gog.com/account/gameDetails/{args.app_id}.json",
+            headers={"Authorization": f"Bearer {access}", "User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"GOG game info failed: {e}")
+    desc = (((data.get("description") or {}).get("full") or "")
+            or ((data.get("description") or {}).get("lead") or ""))
+    import re as _re
+    desc = _re.sub(r"<[^>]+>", "", desc)[:1500]
+    bg = data.get("backgroundImage", "") or ""
+    if bg.startswith("//"):
+        bg = "https:" + bg
+    emit({"type": "done", "ok": True, "store": "gog", "info": {
+        "app_id": args.app_id, "title": data.get("title", ""),
+        "version": "", "cover": bg, "description": desc,
+        "developer": "", "store_url": f"https://www.gog.com/game/{args.app_id}",
+    }})
+
+
+def cmd_library(args):
+    store = args.store
+    if store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        cmd = [LEGENDARY_BIN, "list", "--json"]
+        if args.refresh:
+            cmd.append("--force-refresh")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            die(3, "legendary list timed out")
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout).strip()[-300:]
+            if "ogged in" in err or "login" in err.lower():
+                die(4, "Epic not logged in. Log in from the Stores tab first.")
+            die(3, f"legendary list failed: {err}")
+        try:
+            games = json.loads(proc.stdout)
+        except ValueError:
+            die(3, "Could not parse legendary output")
+        installed = set()
+        try:
+            proc2 = subprocess.run([LEGENDARY_BIN, "list-installed", "--json"],
+                                   capture_output=True, text=True, timeout=60)
+            if proc2.returncode == 0:
+                installed = {g.get("app_name") for g in json.loads(proc2.stdout or "[]")}
+        except (ValueError, subprocess.TimeoutExpired):
+            pass
+        emit({"type": "done", "ok": True, "store": "epic", "games": [
+            {"app_id": g.get("app_name"), "title": g.get("app_title"),
+             "version": g.get("app_version", ""),
+             "installed": g.get("app_name") in installed,
+             "cover": _epic_cover(g),
+             "description": _epic_desc(g)}
+            for g in games if g.get("app_name")
+        ]})
+        return
+    try:
+        import urllib.request
+        import urllib.parse
+    except ImportError:
+        die(3, "urllib missing")
+    access = _gog_access_token()
+    if not access:
+        die(4, "GOG not logged in. Log in from the Stores tab first.")
+    games = []
+    page = 1
+    try:
+        while True:
+            url = ("https://embed.gog.com/account/getFilteredProducts?mediaType=1"
+                   f"&page={page}&sortBy=title")
+            req = urllib.request.Request(url, headers={
+                "Authorization": f"Bearer {access}", "User-Agent": "CorkyTux/3.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            for p in data.get("products", []):
+                img = p.get("image", "") or ""
+                if img.startswith("//"):
+                    img = "https:" + img + "_product_tile_256_2x.jpg"
+                games.append({"app_id": str(p.get("id", "")),
+                              "title": p.get("title", ""),
+                              "version": "",
+                              "installed": False,
+                              "cover": img})
+            if page >= int(data.get("totalPages", 1)) or page >= 10:
+                break
+            page += 1
+    except Exception as e:
+        die(3, f"GOG library failed: {e}")
+    emit({"type": "done", "ok": True, "store": "gog", "games": games})
+
+
+_PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+
+
+def _run_streaming(cmd, store):
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        m = _PROGRESS_RE.search(line)
+        if m:
+            try:
+                pct = float(m.group(1))
+            except ValueError:
+                pct = None
+            emit({"type": "progress", "stage": "downloading", "percent": pct, "store": store})
+        else:
+            emit({"type": "progress", "stage": line[:120], "percent": None, "store": store})
+    proc.wait()
+    return proc.returncode == 0
+
+
+def _legendary_info(app_id: str):
+    try:
+        proc = subprocess.run([LEGENDARY_BIN, "info", app_id, "--json"],
+                              capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            return {}
+        return json.loads(proc.stdout or "{}")
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return {}
+
+
+def cmd_install(args):
+    store = args.store
+    dest = Path(args.path or (Path.home() / "Games" / "Heroic")).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+    if store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        ok = _run_streaming([LEGENDARY_BIN, "install", args.app_id, "-y",
+                             "--base-path", str(dest)], store)
+        if not ok:
+            die(3, "legendary install failed")
+        # Re-read AFTER install: pre-install info has no install section.
+        info = _legendary_info(args.app_id)
+        inst = info.get("install", {}) or {}
+        game = info.get("game", {}) or {}
+        platform = game.get("platform", "Windows")
+        exe = inst.get("executable", "") or ""
+        ipath = inst.get("install_path", "") or str(dest / args.app_id)
+        if not exe and Path(ipath).is_dir():
+            best, best_size = "", -1
+            try:
+                entries = list(Path(ipath).iterdir())
+            except OSError:
+                entries = []
+            for p in entries:
+                if not (p.is_file() and p.suffix.lower() == ".exe"):
+                    continue
+                stem = p.stem.lower()
+                if any(s in stem for s in ("unins", "crashhandler", "setup", "redist", "vcredist", "installer")):
+                    continue
+                try:
+                    sz = p.stat().st_size
+                except OSError:
+                    continue
+                if sz > best_size:
+                    best, best_size = p.name, sz
+            exe = best
+    else:
+        _require_binary(GOGDL_BIN, "gogdl")
+        ok = _run_streaming([GOGDL_BIN, "download", args.app_id,
+                             "--path", str(dest), "--platform", "windows"], store)
+        if not ok:
+            die(3, "gogdl download failed")
+        ipath, exe, platform = _gog_probe(dest, args.app_id)
+    regs = _read_installs()
+    regs[f"{store}:{args.app_id}"] = {"path": ipath, "exe": exe}
+    _write_installs(regs)
+    emit({"type": "done", "ok": True, "store": store, "app_id": args.app_id,
+          "install_path": ipath, "executable": exe,
+          "requires_wine": platform == "Windows"})
+
+
+def _gog_probe(dest: Path, app_id: str):
+    """Find the installed game dir + exe via `gogdl import`, fallback: biggest exe."""
+    try:
+        proc = subprocess.run([GOGDL_BIN, "import", str(dest)], capture_output=True,
+                              text=True, timeout=60)
+        data = json.loads(proc.stdout or "{}")
+        game = data.get("game", {}) if isinstance(data, dict) else {}
+        tasks = game.get("playTasks", []) or []
+        for t in tasks:
+            if (t.get("type") or "").lower() == "filetask" and str(t.get("path", "")).lower().endswith(".exe"):
+                return str(dest), t["path"], "Windows"
+        for t in tasks:
+            if str(t.get("path", "")):
+                return str(dest), t["path"], "Linux"
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        pass
+    best, best_size = "", -1
+    for root, _dirs, files in os.walk(dest):
+        for f in files:
+            if f.lower().endswith(".exe"):
+                try:
+                    sz = os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    continue
+                if sz > best_size:
+                    best, best_size = os.path.join(root, f), sz
+    if best:
+        return str(dest), os.path.relpath(best, dest), "Windows"
+    return str(dest), "", "Linux"
+
+
+def cmd_uninstall(args):
+    if args.store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        proc = subprocess.run([LEGENDARY_BIN, "uninstall", args.app_id, "-y"],
+                              capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            die(3, f"Uninstall failed: {(proc.stderr or proc.stdout).strip()[-200:]}")
+    else:
+        regs = _read_installs()
+        info = regs.get(f"gog:{args.app_id}", {})
+        path = info.get("path", "")
+        if path and Path(path).is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        regs.pop(f"gog:{args.app_id}", None)
+        _write_installs(regs)
+    regs = _read_installs()
+    regs.pop(f"{args.store}:{args.app_id}", None)
+    _write_installs(regs)
+    emit({"type": "done", "ok": True, "store": args.store, "app_id": args.app_id})
+
+
+def _heroic_game_cfg(app_id: str):
+    for base in (HEROIC_DIR / "GamesConfig", HEROIC_DIR / "sideload_apps"):
+        for suffix in (".json", ""):
+            p = base / f"{app_id}{suffix}"
+            if p.is_file():
+                data = _read_json(p)
+                if isinstance(data, dict):
+                    return data.get(app_id, data)
+    return {}
+
+
+def _heroic_titles():
+    cache = HEROIC_DIR / "store_cache" / "legendary_install_info.json"
+    data = _read_json(cache)
+    out = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if k.startswith("_") or not isinstance(v, dict):
+                continue
+            game = v.get("game", {}) if isinstance(v.get("game"), dict) else {}
+            if game.get("title"):
+                out[k] = game["title"]
+    return out
+
+
+def _legendary_list_installed(env_extra=None):
+    try:
+        env = os.environ.copy()
+        if env_extra:
+            env.update(env_extra)
+        proc = subprocess.run([LEGENDARY_BIN, "list-installed", "--json"],
+                              capture_output=True, text=True, timeout=60, env=env)
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout or "[]")
+            return data if isinstance(data, list) else []
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        pass
+    return []
+
+
+def _pretty_dir_title(dirname: str) -> str:
+    name = re.sub(r"(GgG\d+|EGS_?\d*|_?\d{4,})$", "", dirname).strip(" _-")
+    name = re.sub(r"(?<!^)(?=[A-Z][a-z])", " ", name).strip()
+    return re.sub(r"\s+", " ", name) or dirname
+
+
+_SKIP_EXE = ("crashhandler", "crashpad", "unins", "setup", "redist",
+              "vcredist", "dxsetup", "dotnet", "language_setup", "installer",
+              "uninstall", "config", "launcher_update")
+
+
+def _find_exe(root: Path):
+    """Game exe within 1 level: skip helpers/crashhandlers, prefer a name
+    resembling the folder, else the biggest remaining candidate."""
+    try:
+        top = list(root.iterdir())
+    except OSError:
+        return "", False
+    subdirs = [p for p in top if p.is_dir()]
+    # container guard: several subdirs each holding an exe = collection folder
+    with_exe = 0
+    for sub in subdirs:
+        try:
+            if any(f.is_file() and f.suffix.lower() == ".exe" for f in sub.iterdir()):
+                with_exe += 1
+        except OSError:
+            continue
+    if with_exe >= 2:
+        return "", False
+    cands = []
+    for base in [root] + subdirs:
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            if not p.is_file() or p.suffix.lower() != ".exe":
+                continue
+            stem = p.stem.lower()
+            if any(s in stem for s in _SKIP_EXE):
+                continue
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if sz < 50 * 1024:
+                continue
+            cands.append((str(p.relative_to(root)), stem, sz))
+    if not cands:
+        for base in [root] + subdirs:
+            try:
+                entries = list(base.iterdir())
+            except OSError:
+                continue
+            for p in entries:
+                if p.is_file() and not p.suffix and os.access(p, os.X_OK):
+                    return str(p.relative_to(root)), False
+        return "", True
+    norm = re.sub(r"[^a-z0-9]", "", root.name.lower())
+    named = [c for c in cands if c[1].replace(" ", "") and
+             (norm in c[1].replace(" ", "") or c[1].replace(" ", "") in norm)]
+    pool = named or cands
+    best = max(pool, key=lambda c: c[2])
+    return best[0], True
+
+
+def cmd_heroic_scan(_args):
+    games = []
+    seen_paths = set()
+    titles = _heroic_titles()
+
+    def push(store, app, title, version, ipath, exe, platform, eac, battleye):
+        if not ipath or ipath in seen_paths:
+            return
+        seen_paths.add(ipath)
+        games.append({
+            "store": store, "app_id": app or Path(ipath).name,
+            "title": title or _pretty_dir_title(Path(ipath).name),
+            "version": version, "install_path": ipath, "executable": exe,
+            "platform": platform, "requires_wine": platform == "Windows",
+            "eac": bool(eac), "battleye": bool(battleye),
+        })
+
+    if Path(LEGENDARY_BIN).exists() or shutil.which("legendary"):
+        # 1) own session installs
+        for g in _legendary_list_installed():
+            app = g.get("app_name", "")
+            if not app:
+                continue
+            info = _legendary_info(app)
+            game = info.get("game", {}) or {}
+            inst = info.get("install", {}) or {}
+            platform = game.get("platform", "Windows")
+            push("epic", app, game.get("app_title") or titles.get(app) or g.get("title") or app,
+                 inst.get("version") or g.get("version", ""),
+                 inst.get("install_path") or g.get("install_path", ""),
+                 inst.get("executable") or g.get("executable", ""),
+                 platform, False, False)
+        # 2) Heroic's own session installs (read-only: import only)
+        heroic_leg = HEROIC_DIR / "legendaryConfig" / "legendary"
+        if heroic_leg.is_dir():
+            hero_env = {"LEGENDARY_CONFIG_PATH": str(heroic_leg)}
+            hero_list = _legendary_list_installed(hero_env)
+            missing = [g.get("app_name", "") for g in hero_list
+                       if g.get("app_name") and not titles.get(g.get("app_name", ""))]
+            hero_names = {}
+            for app in missing:
+                try:
+                    env = os.environ.copy()
+                    env.update(hero_env)
+                    proc = subprocess.run(
+                        [LEGENDARY_BIN, "info", app, "--json"],
+                        capture_output=True, text=True, timeout=60, env=env)
+                    if proc.returncode == 0:
+                        gg = json.loads(proc.stdout or "{}").get("game") or {}
+                        hero_names[app] = gg.get("title") or gg.get("app_title", "")
+                except (ValueError, subprocess.TimeoutExpired, OSError):
+                    continue
+            for g in hero_list:
+                app = g.get("app_name", "")
+                if not app:
+                    continue
+                cfg = _heroic_game_cfg(app)
+                ipath = g.get("install_path", "")
+                title = (titles.get(app) or hero_names.get(app) or ""
+                         or (g.get("app_title", "") if isinstance(g.get("app_title"), str) else ""))
+                if not title and ipath:
+                    title = _pretty_dir_title(Path(ipath).name)
+                push("epic", app, title or app, g.get("version", ""),
+                     ipath, g.get("executable", ""),
+                     "Windows", cfg.get("eacRuntime", False),
+                     cfg.get("battlEyeRuntime", False))
+    # 3) filesystem fallback ONLY inside Heroic's own folder: game dirs
+    # with an exe but no legendary record (killed/incomplete downloads).
+    # Never ~/Games as a whole — those are GOG/manual games, not Heroic.
+    roots = []
+    for cand in (Path.home() / "Games" / "Heroic",):
+        if cand.is_dir():
+            roots.append(cand)
+    for root in roots:
+        try:
+            subdirs = [p for p in root.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for d in subdirs:
+            if d.name in ("Prefixes", "Heroic", "CommonRedist", "__redist"):
+                continue
+            if str(d) in seen_paths:
+                continue
+            exe, wine = _find_exe(d)
+            if not exe:
+                continue
+            push("epic", d.name, _pretty_dir_title(d.name), "",
+                 str(d), exe, "Windows" if wine else "Linux", False, False)
+    eac = EAC_RUNTIME.is_dir()
+    be = BE_RUNTIME.is_dir()
+    emit({"type": "done", "ok": True, "games": games,
+          "runtimes": {"eac": eac, "battleye": be,
+                       "eac_path": str(EAC_RUNTIME) if eac else "",
+                       "battleye_path": str(BE_RUNTIME) if be else ""}})
+
+
+def cmd_launch_info(args):
+    regs = _read_installs()
+    info = regs.get(f"{args.store}:{args.app_id}", {})
+    if info.get("path"):
+        emit({"type": "done", "ok": True, "store": args.store,
+              "install_path": info.get("path", ""),
+              "executable": info.get("exe", ""),
+              "requires_wine": True})
+        return
+    if args.store == "epic":
+        _require_binary(LEGENDARY_BIN, "legendary")
+        meta = _legendary_info(args.app_id)
+        inst = meta.get("install", {}) or {}
+        game = meta.get("game", {}) or {}
+        if not inst.get("install_path"):
+            die(2, "Game not installed (legendary has no record)")
+        emit({"type": "done", "ok": True, "store": "epic",
+              "install_path": inst.get("install_path", ""),
+              "executable": inst.get("executable", ""),
+              "requires_wine": game.get("platform", "Windows") == "Windows"})
+        return
+    die(2, "Unknown GOG install. Install it from the Stores tab first.")
+
+
+def _login_window_url(store: str) -> str:
+    import urllib.parse
+    if store == "epic":
+        redirect = (f"https://www.epicgames.com/id/api/redirect?clientId={EPIC_CLIENT_ID}"
+                    "&responseType=code")
+        return ("https://www.epicgames.com/id/login?redirectUrl="
+                + urllib.parse.quote(redirect, safe=""))
+    return GOG_LOGIN_URL
+
+
+def _query_param(url: str, key: str) -> str:
+    import urllib.parse
+    try:
+        qs = urllib.parse.urlparse(url).query
+        return (urllib.parse.parse_qs(qs).get(key) or [""])[0]
+    except Exception:
+        return ""
+
+
+def cmd_login_window(args):
+    """Embedded login (Heroic-style): GTK window with WebKit, the code is
+    captured automatically — no copy-paste, no duplicate browser tabs."""
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import Gtk, WebKit2, GLib
+    except (ImportError, ValueError) as e:
+        die(3, f"Login window needs PyGObject WebKit2: {e}")
+    store = args.store
+    got = {"code": ""}
+
+    def finish(code: str):
+        if got["code"]:
+            return
+        got["code"] = code
+        emit({"type": "code", "store": store, "code": code})
+        GLib.idle_add(Gtk.main_quit)
+
+    win = Gtk.Window(title="Log in with " + ("Epic Games" if store == "epic" else "GOG"))
+    win.set_default_size(760, 600)
+    win.connect("close-request", lambda *_: False)
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    col.set_margin_top(6)
+    col.set_margin_bottom(6)
+    col.set_margin_start(6)
+    col.set_margin_end(6)
+    web = WebKit2.WebView()
+    web.set_vexpand(True)
+    web.set_hexpand(True)
+    col.append(web)
+    hint = Gtk.Label(label="Sign in above — the code is captured automatically.")
+    hint.set_wrap(True)
+    col.append(hint)
+
+    def grab_epic_now():
+        def on_js(view, result, _ud):
+            try:
+                text = view.run_javascript_finish(result).get_js_value().to_string()
+                try:
+                    doc = json.loads(text)
+                    code = str(doc.get("authorizationCode") or "")
+                except ValueError:
+                    code = ""
+                if code and code != "null":
+                    finish(code)
+                else:
+                    hint.set_text("No code on this page yet — finish signing in, then wait or press Grab code again.")
+            except Exception:
+                hint.set_text("Could not read the page yet — press Grab code again.")
+        web.run_javascript("document.body ? document.body.innerText : ''", None, on_js, None)
+
+    grab_btn = Gtk.Button(label="Grab code")
+    grab_btn.connect("clicked", lambda *_: grab_current())
+    col.append(grab_btn)
+    win.set_child(col)
+
+    def grab_current():
+        uri = web.get_uri() or ""
+        if store == "gog":
+            code = _query_param(uri, "code")
+            if code:
+                finish(code)
+            else:
+                hint.set_text("No code in the address yet — finish signing in first.")
+        else:
+            grab_epic_now()
+
+    def on_decide(_view, decision, decision_type):
+        if decision_type != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+            return False
+        try:
+            uri = decision.get_navigation_action().get_request().get_uri() or ""
+        except Exception:
+            return False
+        if store == "gog" and "on_login_success" in uri:
+            code = _query_param(uri, "code")
+            if code:
+                decision.ignore()
+                finish(code)
+                return True
+        return False
+
+    web.connect("decide-policy", on_decide)
+
+    def on_load(_view, event):
+        if store == "epic" and event == WebKit2.LoadEvent.FINISHED:
+            uri = web.get_uri() or ""
+            if "id/api/redirect" in uri:
+                grab_epic_now()
+
+    web.connect("load-changed", on_load)
+    web.load_uri(_login_window_url(store))
+    win.present()
+    try:
+        Gtk.main()
+    except KeyboardInterrupt:
+        pass
+    if not got["code"]:
+        emit({"type": "done", "ok": True, "store": store, "code": ""})
+
+
+def _epic_offer_summary(el, now):
+    """(is_active, pct, end_short) for the element's current offer window."""
+    import datetime as _dt
+    promos = el.get("promotions") or {}
+    groups = promos.get("promotionalOffers") or []
+    offers = (groups[0].get("promotionalOffers", []) if groups else [])
+    for off in offers:
+        try:
+            pct = (off.get("discountSetting") or {}).get("discountPercentage", -1)
+            start = _dt.datetime.fromisoformat(str(off.get("startDate", "")).replace("Z", "+00:00"))
+            end = _dt.datetime.fromisoformat(str(off.get("endDate", "")).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if start <= now <= end:
+            return True, pct, end.strftime("%m/%d")
+    return False, -1, ""
+
+
+def _epic_catalog():
+    import urllib.request
+    url = ("https://store-site-backend-static.ak.epicgames.com/"
+           "freeGamesPromotions?locale=en-US&country=US&allowCountries=US")
+    req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode())
+    return (((((data.get("data") or {}).get("Catalog") or {}).get("searchStore") or {}).get("elements")) or [])
+
+
+def _epic_catalog_cover(el):
+    for im in el.get("keyImages", []) or []:
+        if im.get("type") in ("OfferImageTall", "OfferImageWide", "DieselGameBoxTall") and im.get("url"):
+            return im["url"]
+    return ""
+
+
+def _epic_slug_url(el):
+    # urlSlug is the clean store slug; productSlug is often None, a UUID
+    # or a sub-path ("x/home") that 404s.
+    slug = (el.get("urlSlug") or el.get("productSlug") or "").split("?")[0].rstrip("/")
+    if "/" in slug or len(slug) == 32:
+        slug = ""
+    return f"https://store.epicgames.com/en-US/p/{slug}" if slug else ""
+
+
+def _epic_price(el):
+    total = ((el.get("price") or {}).get("totalPrice") or {})
+    fmt = (total.get("fmtPrice") or {})
+    return (fmt.get("discountPrice") or "", fmt.get("originalPrice") or "",
+            total.get("currencyCode") or "")
+
+
+def cmd_epic_deals(_args):
+    import datetime as _dt
+    try:
+        elements = _epic_catalog()
+    except Exception as e:
+        die(3, f"Could not fetch Epic offers: {e}")
+    now = _dt.datetime.now(_dt.timezone.utc)
+    out = []
+    for el in elements:
+        active, pct, end = _epic_offer_summary(el, now)
+        if not active or pct == 0:
+            continue
+        disc, orig, _cur = _epic_price(el)
+        out.append({"title": el.get("title", ""),
+                    "description": el.get("description", ""),
+                    "cover": _epic_catalog_cover(el),
+                    "discount": pct,
+                    "price": disc, "base_price": orig,
+                    "ends": end,
+                    "store_url": _epic_slug_url(el)})
+    out.sort(key=lambda x: -(x["discount"] or 0))
+    emit({"type": "done", "ok": True, "store": "epic", "deals": out})
+
+
+def cmd_gog_store_search(args):
+    """Public GOG catalog search (no login): titles, covers, prices, links."""
+    import urllib.request
+    import urllib.parse
+    try:
+        url = ("https://catalog.gog.com/v1/catalog?query=search/"
+               + urllib.parse.quote(args.query or "") + "&limit="
+               + str(max(1, min(20, args.limit or 10))))
+        req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"GOG store search failed: {e}")
+    out = []
+    for p in data.get("products", []) or []:
+        price = p.get("price") or {}
+        devs = p.get("developers") or []
+        out.append({
+            "id": str(p.get("id", "")),
+            "title": p.get("title", ""),
+            "cover": p.get("coverHorizontal", "") or p.get("coverVertical", ""),
+            "price": str(price.get("final", "")),
+            "base_price": str(price.get("base", "")),
+            "developer": devs[0] if devs else "",
+            "store_url": p.get("storeLink", ""),
+        })
+    emit({"type": "done", "ok": True, "store": "gog", "results": out})
+
+
+def cmd_eos_code(_args):
+    """Epic Online Services exchange code for launching EOS games
+    (Fall Guys & co. refuse to start without -auth_password=<code>).
+    Same mechanism Heroic uses before every Epic launch."""
+    import urllib.request
+    user_path = Path.home() / ".config" / "legendary" / "user.json"
+    try:
+        udata = json.loads(user_path.read_text())
+    except (OSError, ValueError):
+        die(4, "Epic not logged in (no legendary session).")
+    token = udata.get("access_token", "")
+    if not token:
+        die(4, "Epic session expired. Log in again.")
+    try:
+        req = urllib.request.Request(
+            "https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/exchange",
+            headers={"Authorization": f"bearer {token}",
+                     "User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        code = data.get("code", "")
+        if not code:
+            die(4, "Epic rejected the session (expired?). Log in again.")
+        emit({"type": "done", "ok": True,
+              "code": code,
+              "account_id": udata.get("account_id", ""),
+              "display_name": udata.get("display_name", "")})
+    except Exception as e:
+        die(4, f"EOS exchange failed (session expired?): {e}")
+
+
+UMU_DIR = Path.home() / ".local" / "share" / "CorkyTux" / "tools" / "umu"
+UMU_BIN = UMU_DIR / "umu"
+
+
+def _umu_bin():
+    found = shutil.which("umu-run") or shutil.which("umu")
+    if found:
+        return found
+    if UMU_BIN.is_file() and os.access(UMU_BIN, os.X_OK):
+        return str(UMU_BIN)
+    return ""
+
+
+def cmd_umu_status(_args):
+    emit({"type": "done", "ok": True, "available": bool(_umu_bin()),
+          "path": _umu_bin()})
+
+
+def cmd_umu_setup(_args):
+    import urllib.request
+    if _umu_bin():
+        emit({"type": "done", "ok": True, "path": _umu_bin(),
+              "note": "already installed"})
+        return
+    UMU_DIR.mkdir(parents=True, exist_ok=True)
+    emit({"type": "progress", "stage": "fetching-umu-release", "percent": None})
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest",
+            headers={"User-Agent": "CorkyTux/3.0", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            rel = json.loads(resp.read().decode())
+        asset = next((a for a in rel.get("assets", [])
+                      if "zipapp.tar" in a.get("name", "")), None)
+        if not asset:
+            die(2, "No umu zipapp in the latest release")
+        emit({"type": "progress", "stage": "downloading-umu", "percent": 0})
+        import tarfile
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="umu-"))
+        try:
+            tgz = tmp / "umu.tar"
+            req = urllib.request.Request(asset["browser_download_url"],
+                                         headers={"User-Agent": "CorkyTux/3.0"})
+            with urllib.request.urlopen(req, timeout=300) as resp, open(tgz, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            with tarfile.open(tgz) as t:
+                t.extractall(tmp, filter="data")
+            cand = next((p for p in tmp.rglob("umu*")
+                         if p.is_file() and os.access(p, os.X_OK)
+                         and p.suffix not in (".tar", ".gz")), None)
+            if not cand:
+                cand = next((p for p in tmp.rglob("*")
+                             if p.is_file() and p.name == "umu"), None)
+            if not cand:
+                die(3, "umu binary not found inside the release tarball")
+            shutil.copy2(cand, UMU_BIN)
+            os.chmod(UMU_BIN, 0o755)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    except Exception as e:
+        die(3, f"umu install failed: {e}")
+    emit({"type": "done", "ok": True, "path": str(UMU_BIN)})
+
+
+def cmd_free_promos(_args):
+    try:
+        import urllib.request
+        url = ("https://store-site-backend-static.ak.epicgames.com/"
+               "freeGamesPromotions?locale=en-US&country=US&allowCountries=US")
+        req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        die(3, f"Could not fetch promotions: {e}")
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    els = (((data.get("data") or {}).get("Catalog") or {}).get("searchStore") or {}).get("elements", [])
+    out = []
+    for el in els:
+        promos = el.get("promotions") or {}
+        groups = promos.get("promotionalOffers") or []
+        offers = (groups[0].get("promotionalOffers", []) if groups else [])
+        # Truly free = 100% off AND right now inside the offer window.
+        # (Discounted-but-paid games like -20% must NOT appear here.)
+        is_free = False
+        for off in offers:
+            try:
+                pct = (off.get("discountSetting") or {}).get("discountPercentage", -1)
+                start = _dt.datetime.fromisoformat(str(off.get("startDate", "")).replace("Z", "+00:00"))
+                end = _dt.datetime.fromisoformat(str(off.get("endDate", "")).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            if pct == 0 and start <= now <= end:
+                is_free = True
+                break
+        if not is_free:
+            continue
+        slug = (el.get("urlSlug") or el.get("productSlug") or "").split("?")[0].rstrip("/")
+        if "/" in slug or len(slug) == 32:
+            slug = ""
+        cover = ""
+        for im in el.get("keyImages", []) or []:
+            if im.get("type") in ("OfferImageTall", "OfferImageWide", "DieselGameBoxTall") and im.get("url"):
+                cover = im["url"]
+                break
+        out.append({"title": el.get("title", ""),
+                    "description": el.get("description", ""),
+                    "cover": cover,
+                    "store_url": f"https://store.epicgames.com/en-US/p/{slug}" if slug else ""})
+    emit({"type": "done", "ok": True, "store": "epic", "free_now": out})
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="heroic-store")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    sub.add_parser("setup")
+    p_auth = sub.add_parser("auth")
+    p_auth.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_auth.add_argument("--code", default="")
+    p_lo = sub.add_parser("logout")
+    p_lo.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_lib = sub.add_parser("library")
+    p_lib.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_lib.add_argument("--refresh", action="store_true")
+    sub.add_parser("free-promos")
+    p_gss = sub.add_parser("gog-store-search")
+    p_gss.add_argument("--query", default="")
+    p_gss.add_argument("--limit", type=int, default=10)
+    p_ins = sub.add_parser("install")
+    p_ins.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_ins.add_argument("--app-id", required=True)
+    p_ins.add_argument("--path", default="")
+    p_un = sub.add_parser("uninstall")
+    p_un.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_un.add_argument("--app-id", required=True)
+    p_li = sub.add_parser("launch-info")
+    p_li.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_li.add_argument("--app-id", required=True)
+    p_gi = sub.add_parser("game-info")
+    p_gi.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_gi.add_argument("--app-id", required=True)
+    p_lw = sub.add_parser("login-window")
+    p_lw.add_argument("--store", choices=["epic", "gog"], required=True)
+    sub.add_parser("heroic-scan")
+    sub.add_parser("eos-code")
+    sub.add_parser("umu-status")
+    sub.add_parser("umu-setup")
+    sub.add_parser("epic-deals")
+    args = parser.parse_args()
+    dispatch = {
+        "status": cmd_status,
+        "setup": cmd_setup,
+        "auth": cmd_auth,
+        "logout": cmd_logout,
+        "library": cmd_library,
+        "free-promos": cmd_free_promos,
+        "epic-deals": cmd_epic_deals,
+        "gog-store-search": cmd_gog_store_search,
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
+        "launch-info": cmd_launch_info,
+        "game-info": cmd_game_info,
+        "login-window": cmd_login_window,
+        "heroic-scan": cmd_heroic_scan,
+        "eos-code": cmd_eos_code,
+        "umu-status": cmd_umu_status,
+        "umu-setup": cmd_umu_setup,
+    }
+    func = dispatch.get(args.command)
+    if not func:
+        die(2, f"No handler for {args.command}")
+    func(args)
+
+
+if __name__ == "__main__":
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    main()

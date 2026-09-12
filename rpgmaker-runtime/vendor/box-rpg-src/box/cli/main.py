@@ -1,0 +1,120 @@
+"""box-rpg command-line entry point."""
+
+from __future__ import annotations
+
+import sys
+from argparse import Namespace
+from pathlib import Path
+
+from box.cli import cleanup as cleanup_command
+from box.cli import config as config_command
+from box.cli import diagnose as diagnose_command
+from box.cli import inspect as inspect_command
+from box.cli import launch as launch_command
+from box.cli import runtime as runtime_command
+from box.cli.parser import build_parser
+from box.config.repository import ConfigRepository
+from box.engines.registry import default_registry
+from box.errors import BoxError, GameValidationError
+from box.games.detector import detect_game
+from box.paths import AppPaths
+from box.runtime.catalog import RuntimeCatalog
+from box.runtime.platform import current_architecture, normalize_architecture
+from box.utils.i18n import _, configure
+from box.utils.terminal import safe_terminal_text
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse command-line arguments and return a process exit status."""
+    configure()
+    parser = build_parser()
+    arguments = parser.parse_args(argv)
+    if arguments.command is None:
+        try:
+            detect_game(Path("."), default_registry())
+        except GameValidationError:
+            print(
+                _(
+                    "error: no supported RPG Maker game was found here; run box-rpg from the game directory."
+                ),
+                file=sys.stderr,
+            )
+            parser.print_help()
+            return 1
+        arguments = Namespace(
+            command="launch",
+            game=".",
+            runtime_version=None,
+            sdk=False,
+            copy_root_file=[],
+        )
+    try:
+        return _dispatch(arguments)
+    except (BoxError, ValueError) as exc:
+        print(f"{_('error')}: {safe_terminal_text(exc)}", file=sys.stderr)
+        return 1
+
+
+def _dispatch(arguments: Namespace) -> int:
+    """Dispatch one parsed subcommand to its isolated implementation module."""
+    if arguments.command == "inspect":
+        return inspect_command.execute(Path(arguments.game))
+    paths = AppPaths.from_environment()
+    paths.ensure()
+    repository = ConfigRepository(paths)
+    if arguments.command == "cleanup":
+        return cleanup_command.execute(
+            paths,
+            repository,
+            command=arguments.cleanup_command,
+            category=getattr(arguments, "category", None),
+            selector=getattr(arguments, "selector", None),
+            remove_all=getattr(arguments, "remove_all", False),
+            yes=arguments.yes,
+            interactive=arguments.interactive,
+            has_tty=sys.stdin.isatty(),
+        )
+    if arguments.command == "runtime":
+        if arguments.runtime_command == "easyrpg":
+            return runtime_command.easyrpg(paths, arguments.easyrpg_command, arguments)
+        catalog = RuntimeCatalog(paths)
+        if arguments.nwjs_command == "list":
+            return runtime_command.list_runtimes(catalog)
+        architecture = normalize_architecture(arguments.architecture or current_architecture())
+        if arguments.nwjs_command == "available":
+            return runtime_command.available(
+                paths,
+                arguments.page,
+                arguments.interactive,
+                architecture,
+                arguments.sdk,
+            )
+        if arguments.nwjs_command == "install":
+            return runtime_command.install(paths, arguments.version, architecture, arguments.sdk)
+        return runtime_command.remove(catalog, arguments.version, architecture, arguments.sdk)
+    if arguments.command == "launch":
+        return launch_command.execute(
+            paths,
+            repository,
+            Path(arguments.game),
+            arguments.runtime_version,
+            arguments.sdk,
+            tuple(arguments.copy_root_file),
+        )
+    if arguments.command == "config":
+        if arguments.config_command == "show":
+            return config_command.show(repository)
+        return config_command.set_value(repository, arguments.key, arguments.value)
+    if arguments.command == "diagnose":
+        return diagnose_command.execute(
+            paths,
+            repository,
+            Path(arguments.game),
+            arguments.runtime_version,
+            arguments.sdk,
+        )
+    raise ValueError(_("unsupported command: {command}").format(command=arguments.command))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

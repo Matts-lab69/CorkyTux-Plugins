@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Matts-lab69/CorkyTux-Launcher/main/qml/assets/corkytux.png" width="120" alt="CorkyTux Logo">
+  <img src="https://raw.githubusercontent.com/Matts-lab69/CorkyTux-Launcher/main/assets/corkytux.png" width="120" alt="CorkyTux Logo">
 </p>
 
 <h1 align="center">CorkyTux Plugins</h1>
 
 <p align="center">
   <strong>Official plugins for CorkyTux Launcher</strong><br>
-  Extend functionality with dependency installation, DLL overrides, and emulator management.
+  Minecraft, Epic/GOG stores, AppImages, RPG Maker runtimes, dependencies, DLL overrides and emulators for CorkyTux v3 (Rust).
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Plugin--Count-3-blue" alt="Plugins">
+  <img src="https://img.shields.io/badge/Plugin--Count-7-blue" alt="Plugins">
   <img src="https://img.shields.io/badge/Emulators-12%2B-green" alt="Emulators">
   <img src="https://img.shields.io/badge/License-AGPL--3.0-purple" alt="License">
 </p>
@@ -155,6 +155,52 @@ emulator-manager corky-unlink Dolphin
 
 ---
 
+### 4. Minecraft Launcher
+
+**Version:** 1.0.0 | **Type:** `Minecraft` | Streaming JSON-lines
+
+Minecraft Java: offline / Microsoft / Ely.by accounts, Java 8/17/21/25
+auto-detect (`~/jdk`, `/opt/jvm`, `/usr/lib/jvm`, `update-alternatives`),
+isolated instances, Fabric/Forge/Quilt/NeoForge, Modrinth
+(search/install/update + sidecars), `.mrpack` install/import, CurseForge
+(integrated public key). 120s request timeouts.
+
+Requires: `python3` + `requests`, `minecraft_launcher_lib`, `psutil` —
+`pip install --user requests minecraft_launcher_lib psutil` — plus a Java runtime.
+
+---
+
+### 5. Heroic Store (Epic/GOG)
+
+**Version:** 1.0.0 — Epic Games + GOG via own `legendary`/`gogdl`
+(`setup` downloads them to `plugins/heroic-store/bin/`).
+
+Embedded WebKit Epic login with auto-capture, GOG token auth, library with
+covers, `heroic-scan` (own session + Heroic + `~/Games/Heroic` only), `eos-code`,
+`umu-setup` (1.4.4 to `tools/umu`), free promos (100% only), Epic deals
+(%/price/end verified), public GOG catalog search. Epic launch via
+`legendary launch` (game token, epicapp, sandbox, EAC/EOS).
+
+---
+
+### 6. AppImage Launcher
+
+**Version:** 1.0.0 | **Type:** `AppImage`
+
+Run and manage `.AppImage` files: scan, integrate into `~/Applications`,
+launch detached.
+
+---
+
+### 7. RPG Maker Runtime
+
+**Version:** 2.0.0 | **Type:** `RpgMaker`
+
+Run RPG Maker MV/MZ (NW.js) and 2000/2003 (EasyRPG) games via bundled
+`box-rpg` (`vendor/`): scan, diagnose, runtimes, launch.
+
+---
+
 ## Installation
 
 ### Via CorkyTux Launcher (Recommended)
@@ -168,7 +214,7 @@ emulator-manager corky-unlink Dolphin
 ### Manual Installation
 
 1. Download the plugin from the [Releases page](https://github.com/Matts-lab69/CorkyTux-Plugins/releases)
-2. Extract to `~/.config/CorkyTux/plugins/`
+2. Extract to `~/.local/share/CorkyTux/plugins/`
 3. Restart CorkyTux Launcher
 4. Enable the plugin in Settings → Plugins
 

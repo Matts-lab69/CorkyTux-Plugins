@@ -1,0 +1,13 @@
+{
+  "name": "RPG Maker Runtime",
+  "version": "2.0.0",
+  "entry": "rpgmaker-runtime",
+  "type": "RpgMaker",
+  "description": "Run RPG Maker MV/MZ (NW.js) and 2000/2003 (EasyRPG) games via box-rpg: scan, diagnose, runtimes, launch.",
+  "capabilities": ["scan", "diagnose", "status", "install", "run"],
+  "protocol": {
+    "stdout": "single JSON document per invocation",
+    "exitCodes": { "0": "ok", "2": "usage error / invalid path", "3": "operation failed" }
+  },
+  "source": "Matts-lab69/CorkyTux-Plugins"
+}
