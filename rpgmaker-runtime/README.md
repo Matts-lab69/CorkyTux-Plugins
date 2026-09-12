@@ -17,7 +17,18 @@ The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
 ./rpgmaker-runtime diagnose "/path/to/my game"
 ./rpgmaker-runtime install --runtime easyrpg
 ./rpgmaker-runtime run "/path/to/my game"
+./rpgmaker-runtime cleanup list profiles   # what box-rpg accumulated
 ```
+
+## Cleanup & saves
+
+- Each NW.js game keeps a private Chromium profile under the box-rpg cache;
+  list them with `cleanup list profiles` and remove one (or `--all`) with
+  `cleanup remove profiles SELECTOR --yes`. Game directories, configs,
+  sessions and reports are never deleted.
+- EasyRPG saves to `<game>/save/`. Copy existing `Save01.lsd`, `Save02.lsd`,
+  etc. from the game root into that directory to continue old saves — the
+  launcher does not move them automatically.
 
 ## Supported engines
 

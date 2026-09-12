@@ -453,12 +453,31 @@ def cmd_run(args):
 
 # ---------- entry point ----------
 
+def cmd_cleanup(args):
+    """Passthrough to box-rpg cleanup (managed profiles, runtimes, downloads).
+
+    Safe reads: `cleanup list [roots|runtimes|downloads|profiles]`.
+    Deletions need explicit `--yes` (there is no TTY here, prompts abort).
+    Cleanup never deletes game directories, config.toml, sessions or reports.
+    """
+    if not args:
+        fail("usage: cleanup list [roots|runtimes|downloads|profiles] | cleanup all [--yes] | cleanup remove CATEGORY SELECTOR [--yes]",
+             exit_code=2)
+    proc = run_box_rpg(["cleanup"] + args, timeout=120)
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        fail(err or out or "cleanup failed", exit_code=3)
+    emit({"ok": True, "type": "done", "output": out})
+
+
 COMMANDS = {
     "scan": cmd_scan,
     "diagnose": cmd_diagnose,
     "status": cmd_status,
     "install": cmd_install,
     "run": cmd_run,
+    "cleanup": cmd_cleanup,
 }
 
 
