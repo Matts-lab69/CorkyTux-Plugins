@@ -962,13 +962,27 @@ def _epic_search_url(title: str) -> str:
     return f"https://store.epicgames.com/en-US/browse?q={q}" if q else ""
 
 
+def _epic_page_slug(el) -> str:
+    # catalogNs.mappings[0].pageSlug is the authoritative store slug
+    # (urlSlug is often a UUID or a stale-but-clean string that 404s).
+    try:
+        for m in (el.get("catalogNs") or {}).get("mappings") or []:
+            ps = str((m or {}).get("pageSlug") or "").split("?")[0].rstrip("/")
+            if ps and "/" not in ps:
+                return ps
+    except Exception:
+        pass
+    return ""
+
+
 def _epic_slug_url(el):
-    # urlSlug is the clean store slug; productSlug is often None, a UUID
-    # or a sub-path ("x/home") that 404s. Falls back to a store search
-    # (never 404s) so Open/Claim buttons always land somewhere useful.
-    slug = (el.get("urlSlug") or el.get("productSlug") or "").split("?")[0].rstrip("/")
-    if "/" in slug or len(slug) == 32:
-        slug = ""
+    # Real page slug first; urlSlug/productSlug heuristics next; store
+    # search last (never 404s) so Open/Claim buttons always land somewhere.
+    slug = _epic_page_slug(el)
+    if not slug:
+        slug = (el.get("urlSlug") or el.get("productSlug") or "").split("?")[0].rstrip("/")
+        if "/" in slug or len(slug) == 32:
+            slug = ""
     if slug:
         return f"https://store.epicgames.com/en-US/p/{slug}"
     return _epic_search_url(el.get("title", ""))
