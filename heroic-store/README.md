@@ -1,96 +1,96 @@
-# Heroic Store — Tienda Epic y GOG (guía)
+# Heroic Store — Epic & GOG shop (guide)
 
-Plugin `heroic-store`: Epic Games + GOG dentro de CorkyTux usando binarios
-`legendary` / `gogdl` **propios** (no necesitas tenerlos instalados).
+The `heroic-store` plugin brings Epic Games + GOG into CorkyTux using its
+**own** `legendary` / `gogdl` binaries (you don't need them installed).
 
-## Instalación del plugin
+## Plugin installation
 
-1. En CorkyTux ve a **Settings > Plugins** e instala **Heroic Store**,
-   o descarga `heroic-store-*.tar.gz` de
+1. In CorkyTux go to **Settings > Plugins** and install **Heroic Store**,
+   or download `heroic-store-*.tar.gz` from
    [Releases](https://github.com/Matts-lab69/CorkyTux-Plugins/releases)
-   y extráelo en `~/.local/share/CorkyTux/plugins/heroic-store/`
-   (`heroic-store` + `plugin.json`, con permiso de ejecución).
-2. Reinicia el launcher (`pkill -x corkytux`) y abre la página **Tienda**.
+   and extract it to `~/.local/share/CorkyTux/plugins/heroic-store/`
+   (`heroic-store` + `plugin.json`, executable bit set).
+2. Restart the launcher (`pkill -x corkytux`) and open the **Store** page.
 
-## Primer paso: `setup` (obligatorio una vez)
+## First step: `setup` (required once)
 
-El plugin descarga sus propios `legendary` / `gogdl` en:
+The plugin downloads its own `legendary` / `gogdl` to:
 
 ```text
 ~/.local/share/CorkyTux/plugins/heroic-store/bin/
 ```
 
-- Desde la UI se ejecuta solo la primera vez.
+- From the UI it runs automatically the first time.
 - Manual:
   ```bash
   ./heroic-store setup
-  ./heroic-store status   # verifica binarios + sesión
+  ./heroic-store status   # checks binaries + session
   ```
 
-## Iniciar sesión
+## Log in
 
-### Epic Games (login embebido)
+### Epic Games (embedded login)
 
-1. En la pestaña **Epic** pulsa iniciar sesión.
-2. Se abre una ventana WebKit embebida con la web de Epic.
-3. Inicia sesión normal (usuario/contraseña/2FA de Epic).
-4. El plugin **autocaptura** el código de autorización solo, sin que copies nada.
-5. Verás tu avatar + nombre en la cabecera. Para salir: logout.
+1. On the **Epic** tab press log in.
+2. An embedded WebKit window opens with the Epic website.
+3. Log in normally (Epic username/password/2FA).
+4. The plugin **auto-captures** the authorization code — nothing to copy.
+5. You'll see your avatar + name in the header. To leave: logout.
 
-Alternativa por terminal (si el embebido falla):
+Terminal fallback (if the embedded window fails):
 
 ```bash
 ./heroic-store login-window --store epic
-./heroic-store auth --store epic --code TU_CODIGO
+./heroic-store auth --store epic --code YOUR_CODE
 ```
 
-### GOG (token propio)
+### GOG (own token)
 
-1. En la pestaña **GOG** pulsa iniciar sesión.
-2. Se abre la web de GOG para autorizar; el plugin captura el token propio.
-3. Verás tu perfil en la cabecera. Para salir: logout.
+1. On the **GOG** tab press log in.
+2. The GOG website opens to authorize; the plugin captures its own token.
+3. You'll see your profile in the header. To leave: logout.
 
 ```bash
 ./heroic-store login-window --store gog
-./heroic-store auth --store gog --code TU_CODIGO
-./heroic-store logout    # cierra la sesión actual
+./heroic-store auth --store gog --code YOUR_CODE
+./heroic-store logout    # closes the current session
 ```
 
-## Biblioteca, promos y ofertas
+## Library, promos and deals
 
-| Acción | Dónde | Comando |
+| Action | Where | Command |
 |--------|-------|---------|
-| Ver biblioteca | Tabs Epic/GOG (portadas + ficha View con cover+desc) | `./heroic-store library --store epic` / `--store gog` (`--refresh` para forzar) |
-| Juegos gratis | Sección Free games (solo 100% vigentes) | `./heroic-store free-promos` |
-| Ofertas Epic | Sección Deals (%, precio y fin verificados) | `./heroic-store epic-deals` |
-| Buscar/comprar GOG | Buscador + Buy con precios | `./heroic-store gog-store-search --query "hollow knight"` |
-| Buscar Epic | Botón que abre el navegador (Epic no tiene search API pública) | — |
-| Detalle GOG | Ficha del juego | `./heroic-store game-info --store gog --app-id ID` (la descripción solo llega vía gameDetails) |
+| View library | Epic/GOG tabs (covers + View sheet with cover+desc) | `./heroic-store library --store epic` / `--store gog` (`--refresh` to force) |
+| Free games | Free games section (100% off only) | `./heroic-store free-promos` |
+| Epic deals | Deals section (%, price and end date verified) | `./heroic-store epic-deals` |
+| Search/buy GOG | Search + Buy with prices | `./heroic-store gog-store-search --query "hollow knight"` |
+| Search Epic | Button opening the browser (Epic has no public search API) | — |
+| GOG details | Game sheet | `./heroic-store game-info --store gog --app-id ID` (description only arrives via gameDetails) |
 
-## Instalar y jugar
+## Install and play
 
-1. En la ficha pulsa **Instalar** (o `install --store epic --app-id ID [--path DIR]`).
-   Por defecto van a `~/Games/Heroic` y aparecen en la **biblioteca nativa**
-   con el Proton/prefix del launcher.
-2. Para lanzar Epic se usa `legendary launch` con game token, epicapp y sandbox
-   (compatible EAC/EOS). Ejemplo Fall Guys verificado.
-3. Ver datos de lanzamiento: `./heroic-store launch-info --store epic --app-id ID`
-4. Desinstalar: `./heroic-store uninstall --store epic --app-id ID`
-5. Importar lo ya instalado (Heroic u otra ruta):
-   `./heroic-store heroic-scan` (usa sesión propia + Heroic, solo `~/Games/Heroic`)
+1. Press **Install** on the sheet (or `install --store epic --app-id ID [--path DIR]`).
+   Games default to `~/Games/Heroic` and show up in the **native library**
+   with the launcher's Proton/prefix.
+2. Epic launches via `legendary launch` with game token, epicapp and sandbox
+   (EAC/EOS compatible). Fall Guys verified working.
+3. Check launch data: `./heroic-store launch-info --store epic --app-id ID`
+4. Uninstall: `./heroic-store uninstall --store epic --app-id ID`
+5. Import what's already installed (Heroic or another path):
+   `./heroic-store heroic-scan` (own session + Heroic, `~/Games/Heroic` only)
 
 ## EOS / EAC / umu
 
-- Código EOS: `./heroic-store eos-code`
-- Estado umu: `./heroic-store umu-status` · instalar umu 1.4.4 en `tools/umu`:
+- EOS code: `./heroic-store eos-code`
+- umu status: `./heroic-store umu-status` · install umu 1.4.4 into `tools/umu`:
   `./heroic-store umu-setup`
-- EAC/BattlEye y EOS se configuran por juego en CorkyTux (ajustes del juego).
+- EAC/BattlEye and EOS are configured per game in CorkyTux (game settings).
 
-## Problemas comunes
+## Troubleshooting
 
-- **Login Epic no captura**: reintenta `login-window`; completa el 2FA en la ventana.
-- **GOG sin descripción**: normal, solo llega vía gameDetails del juego concreto.
-- **Juego Epic no arranca**: revisa `launch-info`, prueba otro Proton, revisa EAC/EOS.
-- **Pendiente de probar**: login GOG embebido, instalar Epic desde Stores,
-  EAC en prefix fresco, Deals/Claim con ofertas nuevas — reporta en
+- **Epic login doesn't capture**: retry `login-window`; complete 2FA in the window.
+- **GOG without description**: normal, it only arrives via the game's gameDetails.
+- **Epic game won't start**: check `launch-info`, try another Proton, check EAC/EOS.
+- **Still to test**: embedded GOG login, installing Epic games from Stores,
+  EAC on a fresh prefix, Deals/Claim with new offers — report in
   [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).

@@ -6,11 +6,11 @@
 
 <p align="center">
   <strong>Official plugins for CorkyTux Launcher</strong><br>
-  Multi funciones para preservar videojuegos: Minecraft, tiendas Epic/GOG,
-  AppImages, RPG Maker, dependencias, DLLs y emuladores (CorkyTux v3).
+  Multi-purpose plugins to preserve video games: Minecraft, Epic/GOG stores,
+  AppImages, RPG Maker, dependencies, DLLs and emulators (CorkyTux v3).
 </p>
 
-> **Alpha** — plugins en desarrollo activo. Cualquier error, menciónalo en
+> **Alpha** — plugins under active development. Report any bug in
 > [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
 
 <p align="center">
@@ -33,12 +33,12 @@
 
 CorkyTux Plugins is a collection of **official plugins** that extend the capabilities of the [CorkyTux Launcher](https://github.com/Matts-lab69/CorkyTux-Launcher). Each plugin is a standalone executable that integrates with CorkyTux via a simple JSON protocol.
 
-## Guías
+## Guides
 
-- [Tienda Epic y GOG — cómo iniciar sesión y usarla](heroic-store/README.md)
-- [Minecraft — cuentas, Java, instancias y mods](minecraft-launcher/README.md)
-- [RPG Maker — scan, diagnose y run](rpgmaker-runtime/README.md)
-- [AppImage — scan, integrate y run](appimage-launcher/README.md)
+- [Epic & GOG store — how to log in and use it](heroic-store/README.md)
+- [Minecraft — accounts, Java, instances and mods](minecraft-launcher/README.md)
+- [RPG Maker — scan, diagnose and run](rpgmaker-runtime/README.md)
+- [AppImage — scan, integrate and run](appimage-launcher/README.md)
 
 ---
 
@@ -346,12 +346,12 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Credits
 
-- [@Cristioro](https://github.com/Cristioro) — ideas para la UI y sugerencias
-  para hacer más eficiente el código.
-- [christvh / box-rpg](https://gitlab.com/christvh/box-rpg) — usé la lógica de
-  este repositorio para adaptarla a una UI (runtime RPG Maker).
-- [@ZzEdovec](https://github.com/ZzEdovec) — en algunas interfaces o iconos
-  usé o me basé en los repositorios de esta persona.
+- [@Cristioro](https://github.com/Cristioro) — UI ideas and suggestions
+  to make the code more efficient.
+- [christvh / box-rpg](https://gitlab.com/christvh/box-rpg) — I used the logic
+  from this repository and adapted it to a UI (RPG Maker runtime).
+- [@ZzEdovec](https://github.com/ZzEdovec) — for some interfaces and icons
+  I used or took inspiration from this person's repositories.
 
 ---
 

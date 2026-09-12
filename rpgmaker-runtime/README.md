@@ -1,40 +1,40 @@
-# RPG Maker Runtime (guía)
+# RPG Maker Runtime (guide)
 
-Plugin `rpgmaker-runtime`: ejecuta juegos RPG Maker **MV/MZ** (NW.js) y
-**2000/2003** (EasyRPG) gracias a la lógica `box-rpg` incluida en `vendor/`
-(ver créditos en el README principal).
+The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
+**2000/2003** (EasyRPG) games thanks to the `box-rpg` logic bundled in `vendor/`
+(see credits in the main README).
 
-## Cómo funciona
+## How it works
 
-- `scan` encuentra juegos RPG Maker en una carpeta (detecta MV/MZ vs 2000/2003).
-- `diagnose` dice qué runtime falta y cómo arreglarlo.
-- `install` descarga/instala el runtime necesario.
-- `run` lanza el juego con el perfil adecuado.
+- `scan` finds RPG Maker games in a folder (detects MV/MZ vs 2000/2003).
+- `diagnose` tells you which runtime is missing and how to fix it.
+- `install` downloads/installs the needed runtime.
+- `run` launches the game with the right profile.
 
 ```bash
 ./rpgmaker-runtime status
-./rpgmaker-runtime scan /ruta/a/mis/juegos
-./rpgmaker-runtime diagnose "/ruta/a/mi juego"
+./rpgmaker-runtime scan /path/to/my/games
+./rpgmaker-runtime diagnose "/path/to/my game"
 ./rpgmaker-runtime install --runtime easyrpg
-./rpgmaker-runtime run "/ruta/a/mi juego"
+./rpgmaker-runtime run "/path/to/my game"
 ```
 
-## Tipos soportados
+## Supported engines
 
-| Motor | Runtime | Notas |
-|-------|---------|-------|
-| RPG Maker MV / MZ | NW.js | se resuelve/instala vía `box-rpg` |
-| RPG Maker 2000 / 2003 | EasyRPG Player | se resuelve/instala vía `box-rpg` |
+| Engine | Runtime | Notes |
+|--------|---------|-------|
+| RPG Maker MV / MZ | NW.js | resolved/installed via `box-rpg` |
+| RPG Maker 2000 / 2003 | EasyRPG Player | resolved/installed via `box-rpg` |
 
-## Desde CorkyTux
+## From CorkyTux
 
-1. Instala el plugin (Settings > Plugins) o copia `rpgmaker-runtime`,
-   `plugin.json` y la carpeta `vendor/` a
+1. Install the plugin (Settings > Plugins) or copy `rpgmaker-runtime`,
+   `plugin.json` and the `vendor/` folder to
    `~/.local/share/CorkyTux/plugins/rpgmaker-runtime/`.
-2. Registra tu carpeta de juegos y usa scan/diagnose/run desde la UI.
+2. Register your games folder and use scan/diagnose/run from the UI.
 
-## Problemas comunes
+## Troubleshooting
 
-- **Falta NW.js o EasyRPG**: corre `diagnose` y luego `install`.
-- **Juego en ZIP/RAR**: extráelo primero a una carpeta.
-- Reporta errores en [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
+- **Missing NW.js or EasyRPG**: run `diagnose`, then `install`.
+- **Game inside ZIP/RAR**: extract it to a folder first.
+- Report bugs in [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
