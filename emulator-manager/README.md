@@ -154,3 +154,13 @@ flatpak run org.DolphinEmu.dolphin-emu
 ### ROM not detected
 
 Check that your ROM file has the correct extension. The plugin detects files by extension, not by content.
+
+## Credits
+
+- The emulator projects this plugin installs/links (upstream AppImages and docs):
+  [Dolphin](https://dolphin-emu.org), [PCSX2](https://pcsx2.net),
+  [PPSSPP](https://www.ppsspp.org), [RPCS3](https://rpcs3.net),
+  [Ryujinx](https://ryujinx.org), [melonDS](https://melonds.kuribo64.net),
+  [Mupen64Plus](https://mupen64plus.org), [DuckStation](https://www.duckstation.org),
+  [Cemu](https://cemu.info), [Vita3K](https://vita3k.org),
+  [Azahar](https://azahar-emu.org).

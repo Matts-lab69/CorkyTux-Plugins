@@ -96,3 +96,9 @@ Terminal fallback (if the embedded window fails):
 - **Still to test**: embedded GOG login, installing Epic games from Stores,
   EAC on a fresh prefix, Deals/Claim with new offers — report in
   [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
+
+## Credits
+
+- [legendary](https://github.com/derrod/legendary) (Legendary-GL) — Epic backend this plugin drives.
+- [gogdl](https://github.com/Heroic-Games-Launcher/heroic-gogdl) by the Heroic Games Launcher team — GOG backend.
+- [Heroic Games Launcher](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher) — flow inspiration (login, scan, runtimes).

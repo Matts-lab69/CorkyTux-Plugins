@@ -38,3 +38,10 @@ The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
 - **Missing NW.js or EasyRPG**: run `diagnose`, then `install`.
 - **Game inside ZIP/RAR**: extract it to a folder first.
 - Report bugs in [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
+
+## Credits
+
+- [christvh / box-rpg](https://gitlab.com/christvh/box-rpg) — I used the logic
+  from this repository and adapted it to a UI (bundled under `vendor/`).
+- [EasyRPG Player](https://easyrpg.org) — RPG Maker 2000/2003 runtime.
+- [NW.js](https://nwjs.io) — RPG Maker MV/MZ runtime.

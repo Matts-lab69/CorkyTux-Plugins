@@ -26,3 +26,7 @@ The `appimage-launcher` plugin runs and organizes your `.AppImage` files
 - Don't forget the executable bit (`chmod +x *.AppImage`).
 - If an AppImage needs `--no-sandbox` or `libfuse2`, the plugin will tell you.
 - Report bugs in [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
+
+## Credits
+
+- [AppImage](https://appimage.org) team — the portable format this plugin manages.

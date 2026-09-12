@@ -95,3 +95,8 @@ All requests use 120s timeouts (previously silent 30min hangs).
 - **Microsoft never completes**: Azure is a placeholder — use offline or Ely.by meanwhile.
 - **CurseForge 403**: check with `curse-test`; don't set a manual key.
 - Report bugs in [Issues](https://github.com/Matts-lab69/CorkyTux-Plugins/issues).
+
+## Credits
+
+- [minecraft_launcher_lib](https://github.com/jakobkmar/minecraft_launcher_lib) (Python library) — install/launch backend.
+- Mojang/Microsoft session servers, Ely.by auth, and the Modrinth + CurseForge APIs this plugin talks to.
