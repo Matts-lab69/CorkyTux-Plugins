@@ -1009,7 +1009,7 @@ def _epic_price(el):
     return disc, orig, total.get("currencyCode") or ""
 
 
-def _epic_sale_search(count=80):
+def _epic_sale_search(count=120):
     """Full on-sale catalog via the public store GraphQL (the weekly
     freeGamesPromotions feed only carries ~12 items). The API caps pages
     at 40, so paginate."""
@@ -1087,7 +1087,7 @@ def cmd_epic_deals(_args):
                     "store_url": _epic_slug_url(el)})
     # 2) Fill up with the full on-sale catalog (summer sale & co).
     try:
-        extra = _epic_sale_search(80)
+        extra = _epic_sale_search(120)
     except Exception:
         extra = []
     for el in extra:
@@ -1113,7 +1113,7 @@ def cmd_epic_deals(_args):
                     "price": disc, "base_price": orig,
                     "ends": end,
                     "store_url": url})
-        if len(out) >= 80:
+        if len(out) >= 120:
             break
     out.sort(key=lambda x: -(x["discount"] or 0))
     if not out:
