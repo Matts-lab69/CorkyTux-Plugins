@@ -1,7 +1,7 @@
 {
   "id": "heroic-store",
   "name": "Heroic Store (Epic/GOG)",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "entry": "heroic-store",
   "description": "Epic Games + GOG via legendary/gogdl: auth, library, installs into the native CorkyTux library, Heroic scan & import.",
   "source": "Matts-lab69/CorkyTux-Plugins"

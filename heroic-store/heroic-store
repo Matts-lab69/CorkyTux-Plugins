@@ -336,13 +336,28 @@ def cmd_game_info(args):
         if not g:
             die(2, "Game not in Epic library")
         meta = g.get("metadata") or {}
+        title = str(g.get("app_title") or "")
+        desc = _epic_desc(g) or str(meta.get("longDescription") or "")
+        store_url = ""
+        try:
+            match = next((e for e in _epic_catalog()
+                          if str(e.get("title") or "").casefold() == title.casefold()), None)
+        except Exception:
+            match = None
+        if match is not None:
+            if not desc:
+                desc = str(match.get("description") or "")
+            store_url = _epic_slug_url(match)
+        if not store_url:
+            # namespace-based /p/ URLs 404; a store search never does.
+            store_url = _epic_search_url(title)
         emit({"type": "done", "ok": True, "store": "epic", "info": {
-            "app_id": g.get("app_name"), "title": g.get("app_title"),
+            "app_id": g.get("app_name"), "title": title,
             "version": g.get("app_version", ""),
             "cover": _epic_cover(g),
-            "description": _epic_desc(g) or str(meta.get("longDescription") or "")[:1500],
+            "description": desc[:1500],
             "developer": str(meta.get("developer") or ""),
-            "store_url": f"https://store.epicgames.com/en-US/p/{(meta.get('namespace') or '')}",
+            "store_url": store_url,
         }})
         return
     access = _gog_access_token()
@@ -941,13 +956,22 @@ def _epic_catalog_cover(el):
     return ""
 
 
+def _epic_search_url(title: str) -> str:
+    import urllib.parse
+    q = urllib.parse.quote_plus((title or "").strip())
+    return f"https://store.epicgames.com/en-US/browse?q={q}" if q else ""
+
+
 def _epic_slug_url(el):
     # urlSlug is the clean store slug; productSlug is often None, a UUID
-    # or a sub-path ("x/home") that 404s.
+    # or a sub-path ("x/home") that 404s. Falls back to a store search
+    # (never 404s) so Open/Claim buttons always land somewhere useful.
     slug = (el.get("urlSlug") or el.get("productSlug") or "").split("?")[0].rstrip("/")
     if "/" in slug or len(slug) == 32:
         slug = ""
-    return f"https://store.epicgames.com/en-US/p/{slug}" if slug else ""
+    if slug:
+        return f"https://store.epicgames.com/en-US/p/{slug}"
+    return _epic_search_url(el.get("title", ""))
 
 
 def _epic_price(el):
@@ -1139,9 +1163,6 @@ def cmd_free_promos(_args):
                 break
         if not is_free:
             continue
-        slug = (el.get("urlSlug") or el.get("productSlug") or "").split("?")[0].rstrip("/")
-        if "/" in slug or len(slug) == 32:
-            slug = ""
         cover = ""
         for im in el.get("keyImages", []) or []:
             if im.get("type") in ("OfferImageTall", "OfferImageWide", "DieselGameBoxTall") and im.get("url"):
@@ -1150,7 +1171,7 @@ def cmd_free_promos(_args):
         out.append({"title": el.get("title", ""),
                     "description": el.get("description", ""),
                     "cover": cover,
-                    "store_url": f"https://store.epicgames.com/en-US/p/{slug}" if slug else ""})
+                    "store_url": _epic_slug_url(el)})
     emit({"type": "done", "ok": True, "store": "epic", "free_now": out})
 
 
