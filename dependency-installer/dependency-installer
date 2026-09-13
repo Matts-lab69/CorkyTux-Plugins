@@ -661,9 +661,52 @@ def scan_game(game_dir, prefix=None, proton_path=None):
         }, sys.stdout)
 
 
+def _is_wine_stub(fpath):
+    """True if fpath is a Wine/Proton builtin stub, not a real install.
+
+    Proton prefixes symlink system32 DLLs (e.g. mscoree.dll) into the
+    Proton files dir. Those stubs must not count as installed deps.
+    """
+    try:
+        if os.path.islink(fpath):
+            target = os.readlink(fpath).lower()
+            if "wine" in target or "proton" in target or "compatibilitytools" in target:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _real_file(fpath):
+    """True if fpath exists as a real file (not a Wine/Proton stub symlink)."""
+    return os.path.isfile(fpath) and not _is_wine_stub(fpath)
+
+
+# .NET Framework -> (runtime dir, runtime file proving a real install).
+# Wine/Proton ships Mono skeleton dirs (mscorlib etc.) but never clr.dll,
+# so clr.dll is the discriminator for real .NET 4.x.
+DOTNET_PROOF = {
+    "dotnet48": ("v4.0.30319", "clr.dll"),
+    "dotnet472": ("v4.0.30319", "clr.dll"),
+    "dotnet40": ("v4.0.30319", "clr.dll"),
+    "dotnet35sp1": ("v2.0.50727", "mscorwks.dll"),
+    "dotnet20": ("v2.0.50727", "mscorwks.dll"),
+}
+
+
 def check_dep_installed(prefix, dep):
     """Check if a dependency is already installed in the prefix."""
     if not prefix:
+        return False
+    # .NET needs proof of a real install, not Wine/Proton stubs or Mono files.
+    proof = DOTNET_PROOF.get(dep.get("id", ""))
+    if proof:
+        ver_dir, proof_file = proof
+        for base in ("Framework", "Framework64"):
+            if _real_file(os.path.join(
+                    prefix, "drive_c", "windows", "Microsoft.NET",
+                    base, ver_dir, proof_file)):
+                return True
         return False
     sys32 = os.path.join(prefix, "drive_c", "windows", "system32")
     syswow64 = os.path.join(prefix, "drive_c", "windows", "syswow64")
@@ -672,7 +715,7 @@ def check_dep_installed(prefix, dep):
     for dll in dep.get("must_import", []):
         for d in search_dirs:
             fpath = os.path.join(d, dll)
-            if os.path.isfile(fpath):
+            if _real_file(fpath):
                 # For DXVK DLLs: must be >1KB (real DLL, not stub)
                 if dep.get("id") == "dxvk":
                     if os.path.getsize(fpath) > 1000:
