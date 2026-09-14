@@ -142,7 +142,36 @@ def _gog_account_name():
         return ""
 
 
-def cmd_status(_args):
+STATUS_CACHE = CONFIG_DIR / ".status_cache.json"
+
+
+def _status_cache_get(max_age_s=60):
+    try:
+        d = json.loads(STATUS_CACHE.read_text())
+        import time as _t
+        if _t.time() - float(d.get("ts", 0)) <= max_age_s:
+            return d.get("payload")
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _status_cache_set(payload):
+    try:
+        import time as _t
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        STATUS_CACHE.write_text(json.dumps({"ts": _t.time(), "payload": payload}))
+    except OSError:
+        pass
+
+
+def cmd_status(args):
+    quick = bool(getattr(args, "quick", False))
+    if quick:
+        cached = _status_cache_get()
+        if cached is not None:
+            emit({"type": "done", "ok": True, **cached, "cached": True})
+            return
     epic_bin = Path(LEGENDARY_BIN).exists() or shutil.which("legendary") is not None
     gog_bin = Path(GOGDL_BIN).exists() or shutil.which("gogdl") is not None
     epic_logged = False
@@ -150,27 +179,30 @@ def cmd_status(_args):
     if epic_bin:
         try:
             proc = subprocess.run([LEGENDARY_BIN, "status"], capture_output=True,
-                                  text=True, timeout=30)
+                                  text=True, timeout=8)
             epic_logged = "not logged in" not in (proc.stdout + proc.stderr).lower()
         except (OSError, subprocess.TimeoutExpired):
             epic_logged = False
-        if epic_logged:
+        if epic_logged and not quick:
             epic_name = _epic_account_name()
     gog_logged = False
     gog_name = ""
     tok = _read_json(GOG_TOKEN_JSON)
     if isinstance(tok, dict) and tok.get("refresh_token"):
         gog_logged = True
-        gog_name = _gog_account_name()
-        if not gog_name:
-            gog_logged = False
-    emit({"type": "done", "ok": True,
+        if not quick:
+            gog_name = _gog_account_name()
+            if not gog_name:
+                gog_logged = False
+    payload = {
           "bins": {"epic": epic_bin, "gog": gog_bin},
           "logged": {"epic": epic_logged, "gog": gog_logged},
           "accounts": {"epic": epic_name, "gog": gog_name},
           "heroic": {"installed": HEROIC_DIR.is_dir(),
                      "eac_runtime": EAC_RUNTIME.is_dir(),
-                     "battleye_runtime": BE_RUNTIME.is_dir()}})
+                     "battleye_runtime": BE_RUNTIME.is_dir()}}
+    _status_cache_set(payload)
+    emit({"type": "done", "ok": True, **payload, "cached": False})
 
 
 def cmd_logout(args):
@@ -859,11 +891,12 @@ def cmd_login_window(args):
             return
         got["code"] = code
         emit({"type": "code", "store": store, "code": code})
-        GLib.idle_add(Gtk.main_quit)
+        GLib.idle_add(loop.quit)
 
     win = Gtk.Window(title="Log in with " + ("Epic Games" if store == "epic" else "GOG"))
     win.set_default_size(760, 600)
-    win.connect("close-request", lambda *_: False)
+    loop = GLib.MainLoop()
+    win.connect("close-request", lambda *_: (loop.quit(), False)[1])
     col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     col.set_margin_top(6)
     col.set_margin_bottom(6)
@@ -914,7 +947,7 @@ def cmd_login_window(args):
     web.load_uri(_login_window_url(store))
     win.present()
     try:
-        Gtk.main()
+        loop.run()
     except KeyboardInterrupt:
         pass
     if not got["code"]:
@@ -1124,8 +1157,11 @@ def cmd_epic_deals(args):
     out.sort(key=lambda x: -(x["discount"] or 0))
     if not out and start == 0:
         die(3, "Could not fetch Epic offers")
+    has_more = (start + fetched) < total if total else False
     emit({"type": "done", "ok": True, "store": "epic", "deals": out,
-          "total": total, "next": start + fetched})
+          "total": total, "next": start + fetched if has_more else start + fetched,
+          "start": start, "count": count, "fetched": fetched,
+          "has_more": has_more})
 
 
 def cmd_gog_store_search(args):
@@ -1301,7 +1337,8 @@ def cmd_free_promos(_args):
 def main():
     parser = argparse.ArgumentParser(prog="heroic-store")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status")
+    p_status = sub.add_parser("status")
+    p_status.add_argument("--quick", action="store_true")
     sub.add_parser("setup")
     p_auth = sub.add_parser("auth")
     p_auth.add_argument("--store", choices=["epic", "gog"], required=True)
