@@ -559,8 +559,11 @@ def scan_game(game_dir, prefix=None, proton_path=None):
         if dep.get("skip_if_wine"):
             continue
 
-        # If game ships with Mono, skip .NET detection (Mono handles it)
-        if dep["id"] in ("dotnet48", "dotnet35sp1"):
+        # If game ships with Mono, skip .NET detection (Mono handles it).
+        # All .NET Framework verbs must be gated here, not only a subset,
+        # otherwise Unity/Mono games trigger false-positive dotnet installs
+        # that later fail or corrupt the prefix.
+        if dep["id"] in ("dotnet48", "dotnet472", "dotnet40", "dotnet35sp1", "dotnet20"):
             has_mono = False
             has_dotnet = False
             for f in game_files:
