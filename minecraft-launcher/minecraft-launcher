@@ -580,15 +580,22 @@ def cmd_launch(args):
 
 
 def cmd_status(args):
+    mc_dir = _mc_dir(args)
     installed = []
-    if mll is not None and MC_DIR.exists():
-        installed = [v["id"] for v in mll.utils.get_installed_versions(str(MC_DIR))]
+    if mll is not None and mc_dir.exists():
+        try:
+            installed = [v["id"] for v in mll.utils.get_installed_versions(str(mc_dir))]
+        except Exception:
+            installed = []
     accounts = []
     if ACCOUNTS_FILE.exists():
-        accounts = [{"id": a["id"], "name": a["name"], "offline": a.get("offline", False),
-                     "ely": a.get("ely", False)}
-                    for a in json.loads(ACCOUNTS_FILE.read_text())]
-    mods_dir = MC_DIR / "mods"
+        try:
+            accounts = [{"id": a["id"], "name": a["name"], "offline": a.get("offline", False),
+                         "ely": a.get("ely", False)}
+                        for a in json.loads(ACCOUNTS_FILE.read_text())]
+        except ValueError:
+            accounts = []
+    mods_dir = mc_dir / "mods"
     mods_count = 0
     if mods_dir.is_dir():
         mods_count = sum(1 for p in mods_dir.iterdir()
@@ -597,7 +604,52 @@ def cmd_status(args):
     emit({"type": "done", "ok": True, "installed_versions": installed, "accounts": accounts,
           "java": _java_state(), "deps": _deps_state(),
           "azure_configured": not effective_client_id().startswith("REPLACE_WITH"),
-          "mods_count": mods_count, "mods_dir": str(mods_dir)})
+          "mods_count": mods_count, "mods_dir": str(mods_dir),
+          "mc_dir": str(mc_dir)})
+
+
+def _resolve_version_dir(mc_dir: Path, version_id: str) -> Path:
+    name = (version_id or "").strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        die(2, f"invalid version id: {version_id}")
+    base = mc_dir.resolve() if mc_dir.exists() else mc_dir
+    target = (base / "versions" / name).resolve() if base.exists() else (mc_dir / "versions" / name)
+    try:
+        target.relative_to(base.resolve() if base.exists() else mc_dir.resolve())
+    except Exception:
+        die(2, f"invalid version id: {version_id}")
+    return mc_dir / "versions" / name
+
+
+def cmd_instances_list(args):
+    mc_dir = _mc_dir(args)
+    out = []
+    if mll is not None and (mc_dir / "versions").is_dir():
+        try:
+            for v in mll.utils.get_installed_versions(str(mc_dir)):
+                vid = v.get("id", "")
+                out.append({"id": vid, "type": v.get("type", ""),
+                            "mc_version": _mc_of_version_id(vid)})
+        except Exception as e:
+            die(3, f"instances-list failed: {e}")
+    emit({"type": "done", "ok": True, "instances": out, "mc_dir": str(mc_dir)})
+
+
+def cmd_instance_delete(args):
+    import shutil as _sh
+    mc_dir = _mc_dir(args)
+    vid = (args.version or "").strip()
+    if not vid:
+        die(2, "version required")
+    vdir = _resolve_version_dir(mc_dir, vid)
+    if not vdir.is_dir():
+        die(2, f"instance not found: {vid}")
+    try:
+        _sh.rmtree(vdir, ignore_errors=False)
+    except OSError as e:
+        die(3, f"delete failed: {e}")
+    lib = mc_dir / "libraries"
+    emit({"type": "done", "ok": True, "deleted": vid, "mc_dir": str(mc_dir)})
 
 
 def _deps_state():
@@ -1260,8 +1312,8 @@ def _mods_dir(mc_dir=None) -> Path:
 
 
 def cmd_mods_list(args):
-    _ = _mc_dir(args)
-    d = _mods_dir()
+    mc_base = _mc_dir(args)
+    d = _mods_dir(mc_base)
     mods = []
     for p in sorted(d.iterdir()):
         if not p.is_file():
@@ -1278,8 +1330,8 @@ def cmd_mods_list(args):
 
 
 def cmd_mod_toggle(args):
-    _ = _mc_dir(args)
-    d = _mods_dir()
+    mc_base = _mc_dir(args)
+    d = _mods_dir(mc_base)
     name = Path(args.file).name
     enabled_p = d / name
     disabled_p = d / (name if name.endswith(".disabled") else name + ".disabled")
@@ -1297,12 +1349,12 @@ def cmd_mod_toggle(args):
 
 
 def cmd_mods_add(args):
-    _ = _mc_dir(args)
+    mc_base = _mc_dir(args)
     import shutil as _sh
     src = Path(args.path).expanduser()
     if not (src.is_file() and src.suffix.lower() == ".jar"):
         die(2, f"not a .jar file: {src}")
-    d = _mods_dir()
+    d = _mods_dir(mc_base)
     dest = d / src.name
     if dest.exists() and not args.force:
         die(2, f"already exists: {src.name} (use --force to overwrite)")
@@ -1454,6 +1506,7 @@ def _download_with_progress(url: str, dest: Path, stage: str):
     req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
     downloaded = 0
     total = 0
+    last_emit = 0.0
     try:
         with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
             try:
@@ -1461,13 +1514,18 @@ def _download_with_progress(url: str, dest: Path, stage: str):
             except (TypeError, ValueError):
                 total = 0
             while True:
-                chunk = resp.read(1024 * 256)
+                chunk = resp.read(1024 * 1024)
                 if not chunk:
                     break
                 f.write(chunk)
                 downloaded += len(chunk)
-                pct = round(downloaded * 100 / total, 1) if total else None
-                emit({"type": "progress", "stage": stage, "percent": pct})
+                now = downloaded
+                import time as _t
+                t = _t.monotonic()
+                if total and (t - last_emit >= 0.5 or now == total):
+                    last_emit = t
+                    pct = round(now * 100 / total, 1)
+                    emit({"type": "progress", "stage": stage, "percent": pct})
     except Exception as e:
         if dest.exists():
             dest.unlink(missing_ok=True)
@@ -1858,7 +1916,11 @@ def cmd_cf_modpack_install(args):
         mods_dir = dest_base / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
         total = len(entries)
-        for i, entry in enumerate(entries):
+        import concurrent.futures as _cfu
+        import threading as _th
+
+        def _resolve(i_entry):
+            i, entry = i_entry
             pid, fid = entry.get("projectID"), entry.get("fileID")
             try:
                 info = _cf_get(f"/mods/{pid}/files/{fid}")
@@ -1866,15 +1928,39 @@ def cmd_cf_modpack_install(args):
                 url = fdata.get("downloadUrl", "")
                 fname = fdata.get("fileName", "")
                 if not url or not fname:
-                    continue
-                dest = mods_dir / fname
-                if not dest.exists():
-                    emit({"type": "progress",
-                          "stage": f"mods-{i + 1}/{total}-{fname}",
-                          "percent": round((i / max(1, total)) * 100, 1)})
-                    _download_with_progress(url, dest, f"mods-{i + 1}/{total}")
+                    return None
+                if (mods_dir / fname).exists():
+                    return ("skip", fname)
+                return (url, fname)
             except Exception:
-                continue
+                return None
+
+        jobs = []
+        with _cfu.ThreadPoolExecutor(max_workers=8) as ex:
+            for r in ex.map(_resolve, enumerate(entries)):
+                if r and r[0] != "skip":
+                    jobs.append(r)
+        done_n = [0]
+        lock = _th.Lock()
+
+        def _dl(job):
+            url, fname = job
+            dest = mods_dir / fname
+            try:
+                _download_with_progress(url, dest, "mods")
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+            with lock:
+                done_n[0] += 1
+                n = done_n[0]
+            emit({"type": "progress", "stage": f"mods-{n}/{len(jobs)}-{fname}",
+                  "percent": round(n * 100 / max(1, len(jobs)), 1)})
+
+        emit({"type": "progress", "stage": f"mods-0/{len(jobs)}", "percent": 0})
+        with _cfu.ThreadPoolExecutor(max_workers=6) as ex:
+            list(ex.map(_dl, jobs))
         over = str(manifest.get("overrides", "") or "overrides").lstrip("/")
         over_dir = extracted / over
         if over_dir.is_dir():
@@ -2348,8 +2434,19 @@ def main():
     p_launch.add_argument("--mc-dir", default="")
     p_launch.set_defaults(func=cmd_launch)
 
-    sub.add_parser("status").set_defaults(func=cmd_status)
+    p_status = sub.add_parser("status")
+    p_status.add_argument("--mc-dir", default="")
+    p_status.set_defaults(func=cmd_status)
     sub.add_parser("setup").set_defaults(func=cmd_setup)
+
+    p_ilist = sub.add_parser("instances-list")
+    p_ilist.add_argument("--mc-dir", default="")
+    p_ilist.set_defaults(func=cmd_instances_list)
+
+    p_idel = sub.add_parser("instance-delete")
+    p_idel.add_argument("--version", required=True)
+    p_idel.add_argument("--mc-dir", default="")
+    p_idel.set_defaults(func=cmd_instance_delete)
 
     p_off = sub.add_parser("offline")
     p_off.add_argument("--name", required=True)

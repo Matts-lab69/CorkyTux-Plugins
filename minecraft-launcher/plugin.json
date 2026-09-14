@@ -1,6 +1,6 @@
 {
   "name": "Minecraft Launcher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "entry": "minecraft-launcher",
   "type": "Minecraft",
   "description": "Minecraft Java: MS/offline accounts, versions, Adoptium Java 17/21/25, instances, mods-ready.",
