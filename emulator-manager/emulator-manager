@@ -207,11 +207,22 @@ EMULATORS = {
 
 
 def load_linked():
-    """Load linked emulators from JSON file."""
+    """Load linked emulators from JSON file, pruning stale entries."""
     if os.path.exists(LINKED_FILE):
         try:
             with open(LINKED_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, dict):
+                stale = [k for k, v in data.items()
+                         if not os.path.isfile((v or {}).get("path", ""))]
+                if stale:
+                    for k in stale:
+                        del data[k]
+                    try:
+                        save_linked(data)
+                    except Exception:
+                        pass
+                return data
         except Exception:
             pass
     return {}
@@ -239,15 +250,30 @@ def is_installed(name):
     linked = load_linked()
     if name in linked:
         path = linked[name].get("path", "")
-        return os.path.isfile(path) and os.access(path, os.X_OK)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return True
     path = os.path.join(EMULATORS_DIR, name + ".AppImage")
     if os.path.isfile(path) and os.access(path, os.X_OK):
         return True
-    # Check system binaries
     for bin_name in SYSTEM_NAMES.get(name, []):
         if shutil.which(bin_name):
             return True
     return False
+
+
+def get_source(name):
+    linked = load_linked()
+    if name in linked:
+        p = linked[name].get("path", "")
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return "linked"
+    app = os.path.join(EMULATORS_DIR, name + ".AppImage")
+    if os.path.isfile(app) and os.access(app, os.X_OK):
+        return "appimage"
+    for bin_name in SYSTEM_NAMES.get(name, []):
+        if shutil.which(bin_name):
+            return "system"
+    return "none"
 
 
 def get_path(name):
@@ -284,28 +310,30 @@ def list_emulators():
     linked = load_linked()
     result = []
     for name, info in EMULATORS.items():
-        is_link = name in linked
+        src = get_source(name)
         result.append({
             "name": name,
             "description": info["description"],
             "extensions": info["extensions"],
-            "installed": is_installed(name),
+            "installed": src != "none",
             "path": get_path(name),
             "launch_args": get_launch_args(name),
-            "linked": is_link,
+            "linked": src == "linked",
+            "source": src,
             "settings": info.get("settings", []),
         })
-    # Add linked emulators not in EMULATORS list (custom/unknown)
     for name, data in linked.items():
         if name not in EMULATORS:
+            ok = os.path.isfile(data.get("path", "")) and os.access(data.get("path", ""), os.X_OK)
             result.append({
                 "name": name,
                 "description": data.get("description", "Custom emulator"),
                 "extensions": data.get("extensions", []),
-                "installed": True,
+                "installed": bool(ok),
                 "path": data.get("path", ""),
                 "launch_args": data.get("launch_args", "{rom}"),
-                "linked": True,
+                "linked": bool(ok),
+                "source": "linked" if ok else "none",
             })
     return result
 
