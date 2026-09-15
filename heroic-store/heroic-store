@@ -894,35 +894,105 @@ def cmd_login_window(args):
         GLib.idle_add(loop.quit)
 
     win = Gtk.Window(title="Log in with " + ("Epic Games" if store == "epic" else "GOG"))
-    win.set_default_size(760, 600)
+    win.set_default_size(720, 560)
     loop = GLib.MainLoop()
     win.connect("close-request", lambda *_: (loop.quit(), False)[1])
-    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-    col.set_margin_top(6)
-    col.set_margin_bottom(6)
-    col.set_margin_start(6)
-    col.set_margin_end(6)
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    col.set_margin_top(4)
+    col.set_margin_bottom(4)
+    col.set_margin_start(4)
+    col.set_margin_end(4)
     web = WebKit2.WebView()
     web.set_vexpand(True)
     web.set_hexpand(True)
+    try:
+        settings = web.get_settings()
+        settings.set_property("enable-javascript", True)
+        settings.set_property("enable-media-stream", True)
+        settings.set_property("user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
+    except Exception:
+        pass
+    try:
+        ctx = web.get_network_session() if hasattr(web, "get_network_session") else WebKit2.WebContext.get_default()
+        if ctx is not None and hasattr(ctx, "set_persistent_credential_storage_enabled"):
+            ctx.set_persistent_credential_storage_enabled(True)
+    except Exception:
+        pass
     col.append(web)
     hint = Gtk.Label(label="Sign in above — the code is captured automatically.")
     hint.set_wrap(True)
     col.append(hint)
 
     def code_in_uri(uri: str) -> str:
-        # Epic lands on .../id/api/redirect?authorizationCode=XXX after login;
-        # GOG lands on .../on_login_success?...&code=XXX. No JS needed.
         if store == "gog":
-            return _query_param(uri, "code") if "on_login_success" in uri else ""
-        return _query_param(uri, "authorizationCode") if "id/api/redirect" in uri else ""
+            if "on_login_success" in uri:
+                c = _query_param(uri, "code")
+                if c:
+                    return c
+                import urllib.parse as _up
+                try:
+                    frag = _up.urlparse(uri).fragment
+                    return (_up.parse_qs(frag).get("code") or [""])[0]
+                except Exception:
+                    return ""
+            return ""
+        if "id/api/redirect" in uri:
+            c = _query_param(uri, "authorizationCode")
+            if c and c != "null":
+                return c
+        return ""
+
+    def code_in_body(text: str) -> str:
+        try:
+            doc = json.loads(text)
+            c = str(doc.get("authorizationCode") or "")
+            if c and c != "null":
+                return c
+        except Exception:
+            pass
+        m = re.search(r'"authorizationCode"\s*:\s*"([A-Za-z0-9]+)"', text or "")
+        if m and m.group(1) != "null":
+            return m.group(1)
+        return ""
 
     def grab_current():
         uri = web.get_uri() or ""
-        if code_in_uri(uri):
-            finish(code_in_uri(uri))
+        c = code_in_uri(uri)
+        if c:
+            finish(c)
+            return
+        try:
+            web.evaluate_javascript("document.documentElement.innerText", -1, None, None, None, lambda w, r, u: _grab_js_done(w, r), None)
+        except Exception:
+            try:
+                web.run_javascript("document.documentElement.innerText", None, lambda w, r, u: _grab_js_done(w, r), None)
+            except Exception:
+                hint.set_text("No code in the address yet — finish signing in first.")
+
+    def _grab_js_done(view, res):
+        try:
+            jsr = view.evaluate_javascript_finish(res) if hasattr(view, "evaluate_javascript_finish") else view.run_javascript_finish(res)
+            txt = jsr.get_js_value().to_string() if hasattr(jsr, "get_js_value") else str(jsr)
+        except Exception:
+            hint.set_text("No code in the address yet — finish signing in first.")
+            return
+        c = code_in_body(txt or "")
+        if c:
+            finish(c)
         else:
             hint.set_text("No code in the address yet — finish signing in first.")
+
+    def check_load(view, _ev):
+        uri = view.get_uri() or ""
+        c = code_in_uri(uri)
+        if c:
+            finish(c)
+            return
+        if store == "epic" and "id/api/redirect" in uri:
+            try:
+                view.evaluate_javascript("document.body.innerText", -1, None, None, None, lambda w, r, u: _grab_js_done(w, r), None)
+            except Exception:
+                pass
 
     grab_btn = Gtk.Button(label="Grab code")
     grab_btn.connect("clicked", lambda *_: grab_current())
@@ -944,6 +1014,10 @@ def cmd_login_window(args):
         return False
 
     web.connect("decide-policy", on_decide)
+    try:
+        web.connect("load-changed", check_load)
+    except Exception:
+        pass
     web.load_uri(_login_window_url(store))
     win.present()
     try:

@@ -152,25 +152,48 @@ def extract_icon_to(src: Path, dest: Path) -> str:
         if tmpd.exists():
             shutil.rmtree(tmpd, ignore_errors=True)
         tmpd.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(
-            [str(src), "--appimage-extract", ".DirIcon"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=40,
-            cwd=str(tmpd),
-        )
-        cand = tmpd / "squashfs-root" / ".DirIcon"
-        if proc.returncode != 0 or not cand.is_file():
-            shutil.rmtree(tmpd, ignore_errors=True)
-            return ""
-        data = cand.read_bytes()
+        root = tmpd / "squashfs-root"
+        data = b""
+        for target in (".DirIcon", "*.desktop"):
+            proc = subprocess.run(
+                [str(src), "--appimage-extract", target],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=40,
+                cwd=str(tmpd),
+            )
+            if proc.returncode == 0 and root.is_dir():
+                break
+        if root.is_dir():
+            cands = []
+            d = root / ".DirIcon"
+            if d.is_file():
+                cands.append(d)
+            for dp in sorted(root.glob("*.desktop")):
+                try:
+                    txt = dp.read_text(errors="ignore")
+                    m = re.search(r"^Icon=(.+)$", txt, re.M)
+                    if m:
+                        iname = m.group(1).strip()
+                        for pat in (f"**/{iname}.png", f"**/{iname}.svg", f"**/{iname}.xpm", f"**/{iname}*"):
+                            cands.extend(sorted(root.glob(pat)))
+                except OSError:
+                    pass
+            for pat in ("*.png", "*.svg", "usr/share/icons/**/*.png", "usr/share/icons/**/*.svg", "usr/share/pixmaps/*"):
+                cands.extend(sorted(root.glob(pat)))
+            for c in cands:
+                try:
+                    if c.is_file() and c.stat().st_size >= 100:
+                        data = c.read_bytes()
+                        break
+                except OSError:
+                    continue
+        shutil.rmtree(tmpd, ignore_errors=True)
         if len(data) < 100:
-            shutil.rmtree(tmpd, ignore_errors=True)
             return ""
         final = dest.with_suffix(f".{sniff_ext(data)}")
         final.write_bytes(data)
-        shutil.rmtree(tmpd, ignore_errors=True)
         return str(final)
     except (OSError, subprocess.TimeoutExpired):
         return ""
