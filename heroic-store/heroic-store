@@ -854,12 +854,17 @@ def cmd_launch_info(args):
 
 
 def _login_window_url(store: str) -> str:
-    import urllib.parse
     if store == "epic":
-        redirect = (f"https://www.epicgames.com/id/api/redirect?clientId={EPIC_CLIENT_ID}"
-                    "&responseType=code")
+        # Heroic-style: responseType=code plus a redirectUrl that points back to
+        # localhost so this window can read the code. Without redirectUrl Epic
+        # never lands on a URL that carries the code (it just ends up back on
+        # epicgames.com), so the localhost/launcher/authorized?code=... capture
+        # below would never fire.
+        from urllib.parse import quote
         return ("https://www.epicgames.com/id/login?redirectUrl="
-                + urllib.parse.quote(redirect, safe=""))
+                + quote("http://localhost/launcher/authorized", safe="")
+                + "&responseType=code"
+                + "&display=popup")  # inline forward (same view), never window.open
     return GOG_LOGIN_URL
 
 
@@ -870,6 +875,16 @@ def _query_param(url: str, key: str) -> str:
         return (urllib.parse.parse_qs(qs).get(key) or [""])[0]
     except Exception:
         return ""
+
+
+def _dbg(msg):
+    """Write a debug line to /tmp/corkytux_sso_debug.log."""
+    try:
+        with open("/tmp/corkytux_sso_debug.log", "a") as f:
+            import time
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
 
 
 def cmd_login_window(args):
@@ -883,45 +898,24 @@ def cmd_login_window(args):
     except (ImportError, ValueError) as e:
         die(3, f"Login window needs PyGObject WebKitGTK 6.0 for GTK4 "
                f"(e.g. net-libs/webkit-gtk:6 on Gentoo). Or paste the code manually: {e}")
+    import json as _json
     store = args.store
     got = {"code": ""}
+
+    # Clear previous debug log
+    try:
+        open("/tmp/corkytux_sso_debug.log", "w").close()
+    except Exception:
+        pass
+    _dbg(f"=== LOGIN WINDOW OPENED store={store} ===")
 
     def finish(code: str):
         if got["code"]:
             return
         got["code"] = code
+        _dbg(f"*** CODE CAPTURED: {code[:12]}... ***")
         emit({"type": "code", "store": store, "code": code})
         GLib.idle_add(loop.quit)
-
-    win = Gtk.Window(title="Log in with " + ("Epic Games" if store == "epic" else "GOG"))
-    win.set_default_size(720, 560)
-    loop = GLib.MainLoop()
-    win.connect("close-request", lambda *_: (loop.quit(), False)[1])
-    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-    col.set_margin_top(4)
-    col.set_margin_bottom(4)
-    col.set_margin_start(4)
-    col.set_margin_end(4)
-    web = WebKit2.WebView()
-    web.set_vexpand(True)
-    web.set_hexpand(True)
-    try:
-        settings = web.get_settings()
-        settings.set_property("enable-javascript", True)
-        settings.set_property("enable-media-stream", True)
-        settings.set_property("user-agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
-    except Exception:
-        pass
-    try:
-        ctx = web.get_network_session() if hasattr(web, "get_network_session") else WebKit2.WebContext.get_default()
-        if ctx is not None and hasattr(ctx, "set_persistent_credential_storage_enabled"):
-            ctx.set_persistent_credential_storage_enabled(True)
-    except Exception:
-        pass
-    col.append(web)
-    hint = Gtk.Label(label="Sign in above — the code is captured automatically.")
-    hint.set_wrap(True)
-    col.append(hint)
 
     def code_in_uri(uri: str) -> str:
         if store == "gog":
@@ -936,96 +930,214 @@ def cmd_login_window(args):
                 except Exception:
                     return ""
             return ""
-        if "id/api/redirect" in uri:
-            c = _query_param(uri, "authorizationCode")
-            if c and c != "null":
-                return c
+        # Heroic pattern: hostname === 'localhost' → extract code param
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(uri)
+        except Exception:
+            return ""
+        if parsed.hostname in ("localhost", "127.0.0.1"):
+            code = parsed.query.split("code=")[1].split("&")[0] if "code=" in parsed.query else ""
+            if code:
+                return code
+        # authorizationCode param (old id/api/redirect flow)
+        code2 = _query_param(uri, "authorizationCode")
+        if code2:
+            return code2
         return ""
 
-    def code_in_body(text: str) -> str:
+    def try_extract_code_from_page(webview=None):
+        """Read the page body via JS and parse the JSON response.
+        Matches Playnite's approach: check page source for localhost URL.
+        `webview` defaults to the main login view (also usable on SSO popups)."""
+        target = webview if webview is not None else web
+        js = "(function() { try { return document.body ? document.body.innerText : ''; } catch(e) { return ''; } })()"
+        def on_js(grw, res, _ud):
+            try:
+                val = grw.evaluate_javascript_finish(res)
+                text = val.to_string().strip() if val else ""
+                _dbg(f"Page body len={len(text)}, first300={text[:300]!r}")
+                if not text:
+                    return
+                # Try JSON parse (Epic id/api/redirect returns JSON)
+                try:
+                    data = _json.loads(text)
+                    code = (data.get("authorizationCode")
+                            or data.get("authorization_code")
+                            or data.get("code")
+                            or data.get("sid") or "")
+                    if code:
+                        _dbg(f"Found code in JSON: {str(code)[:12]}...")
+                        finish(str(code))
+                        return
+                except _json.JSONDecodeError:
+                    pass
+                # Playnite pattern: regex for localhost/launcher/authorized?code=
+                import re
+                m = re.search(r'localhost/launcher/authorized\?code=([a-zA-Z0-9_-]+)', text)
+                if m:
+                    _dbg(f"Found code in page text via regex: {m.group(1)[:12]}...")
+                    finish(m.group(1))
+            except Exception as e:
+                _dbg(f"JS eval error: {e}")
+        target.evaluate_javascript(js, -1, None, None, None, on_js, None)
+
+    def try_extract_code_from_uri(uri: str) -> bool:
+        code = code_in_uri(uri)
+        if code:
+            _dbg(f"Found code in URI: {str(code)[:12]}... uri={uri[:120]}")
+            finish(str(code))
+            return True
+        return False
+
+    win = Gtk.Window(title="Log in with " + ("Epic Games" if store == "epic" else "GOG"))
+    win.set_default_size(760, 600)
+    loop = GLib.MainLoop()
+    win.connect("close-request", lambda *_: (loop.quit(), False)[1])
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    col.set_margin_top(6)
+    col.set_margin_bottom(6)
+    col.set_margin_start(6)
+    col.set_margin_end(6)
+    web = WebKit2.WebView()
+    web.set_vexpand(True)
+    web.set_hexpand(True)
+
+    # The Epic login URL carries &display=popup, which makes Epic perform the
+    # provider SSO as an INLINE navigation in this same view instead of a JS
+    # window.open popup (verified on the live page). No popup handling needed.
+    try:
+        settings = web.get_settings()
+        settings.set_property("enable-javascript", True)
+        settings.set_property("enable-media-stream", True)
+    except Exception:
+        pass
+    try:
+        ctx = web.get_network_session() if hasattr(web, "get_network_session") else WebKit2.WebContext.get_default()
+        if ctx is not None and hasattr(ctx, "set_persistent_credential_storage_enabled"):
+            ctx.set_persistent_credential_storage_enabled(True)
+    except Exception:
+        pass
+    if store == "epic":
         try:
-            doc = json.loads(text)
-            c = str(doc.get("authorizationCode") or "")
-            if c and c != "null":
-                return c
+            s = web.get_settings()
+            s.set_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EpicGamesLauncher")
+            _dbg("User agent set to EpicGamesLauncher")
+        except Exception as e:
+            _dbg(f"set_user_agent failed: {e}")
+    else:
+        try:
+            s = web.get_settings()
+            s.set_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
         except Exception:
             pass
-        m = re.search(r'"authorizationCode"\s*:\s*"([A-Za-z0-9]+)"', text or "")
-        if m and m.group(1) != "null":
-            return m.group(1)
-        return ""
+
+    col.append(web)
+    hint = Gtk.Label(label="Sign in above — the code is captured automatically.")
+    hint.set_wrap(True)
+    col.append(hint)
 
     def grab_current():
         uri = web.get_uri() or ""
-        c = code_in_uri(uri)
-        if c:
-            finish(c)
+        _dbg(f"Grab button: uri={uri[:120]}")
+        if try_extract_code_from_uri(uri):
             return
-        try:
-            web.evaluate_javascript("document.documentElement.innerText", -1, None, None, None, lambda w, r, u: _grab_js_done(w, r), None)
-        except Exception:
-            try:
-                web.run_javascript("document.documentElement.innerText", None, lambda w, r, u: _grab_js_done(w, r), None)
-            except Exception:
-                hint.set_text("No code in the address yet — finish signing in first.")
-
-    def _grab_js_done(view, res):
-        try:
-            jsr = view.evaluate_javascript_finish(res) if hasattr(view, "evaluate_javascript_finish") else view.run_javascript_finish(res)
-            txt = jsr.get_js_value().to_string() if hasattr(jsr, "get_js_value") else str(jsr)
-        except Exception:
-            hint.set_text("No code in the address yet — finish signing in first.")
-            return
-        c = code_in_body(txt or "")
-        if c:
-            finish(c)
-        else:
-            hint.set_text("No code in the address yet — finish signing in first.")
-
-    def check_load(view, _ev):
-        uri = view.get_uri() or ""
-        c = code_in_uri(uri)
-        if c:
-            finish(c)
-            return
-        if store == "epic" and "id/api/redirect" in uri:
-            try:
-                view.evaluate_javascript("document.body.innerText", -1, None, None, None, lambda w, r, u: _grab_js_done(w, r), None)
-            except Exception:
-                pass
+        hint.set_text("Reading page content…")
+        try_extract_code_from_page()
 
     grab_btn = Gtk.Button(label="Grab code")
     grab_btn.connect("clicked", lambda *_: grab_current())
     col.append(grab_btn)
     win.set_child(col)
 
+    # ─── Heroic's EXACT pattern: dom-ready + URL check ───
+    # Heroic does NOT intercept decide-policy. It lets the page load
+    # naturally, then checks webview.getURL() on dom-ready (= FINISHED).
+    # For SSO popups, Heroic uses Electron's allowpopups + partition.
+
+    def on_load_changed(_view, load_event):
+        if load_event != WebKit2.LoadEvent.FINISHED:
+            return
+        uri = web.get_uri() or ""
+        _dbg(f"FINISHED uri={uri[:150]}")
+
+        # Heroic pattern: check URL directly
+        if try_extract_code_from_uri(uri):
+            return
+
+        # Also try page content (Playnite pattern: regex in page source)
+        _dbg("  Trying page content extraction...")
+        try_extract_code_from_page()
+
+    # ─── SSO providers: no popup machinery needed ───
+    # Epic's cookie login page opens provider SSO (Google/Steam/...) via
+    # window.open when it runs windowed. We avoid that entirely: the login URL
+    # now carries &display=popup, which makes Epic navigate the provider
+    # "forward" page INLINE in the same WebView (verified on the live page).
+    # (This WebKitGTK build aborts on the "create" signal, so real popups are
+    # deliberately not attempted — display=popup sidesteps them.)
     def on_decide(_view, decision, decision_type):
-        if decision_type != WebKit2.PolicyDecisionType.NAVIGATION_ACTION:
+        # Log any new-window request for diagnosis; never repurpose it. NAV/RESP
+        # are let through untouched (unhandled = accepted, as the page relies on).
+        if decision_type != WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION:
             return False
         try:
             uri = decision.get_navigation_action().get_request().get_uri() or ""
         except Exception:
-            return False
-        code = code_in_uri(uri)
-        if code:
-            decision.ignore()
-            finish(code)
-            return True
+            uri = ""
+        from urllib.parse import urlparse
+        host = urlparse(uri).hostname or ""
+        _dbg(f"NEW_WINDOW host={host} uri={uri[:120]}")
         return False
 
     web.connect("decide-policy", on_decide)
-    try:
-        web.connect("load-changed", check_load)
-    except Exception:
-        pass
+    web.connect("load-changed", on_load_changed)
+
+    # Poll: keeps checking URI + page content every 500s for 30s
+    # Covers cases where load-changed misses the redirect
+    poll_id = [None]
+    def _schedule_poll():
+        if poll_id[0] is not None:
+            GLib.source_remove(poll_id[0])
+        attempts = [0]
+        def _poll():
+            if got["code"]:
+                poll_id[0] = None
+                return False
+            attempts[0] += 1
+            if attempts[0] > 60:
+                _dbg("Poll: 30s timeout")
+                poll_id[0] = None
+                return False
+            uri = web.get_uri() or ""
+            _dbg(f"Poll #{attempts[0]}: uri={uri[:100]}")
+            if try_extract_code_from_uri(uri):
+                poll_id[0] = None
+                return False
+            try_extract_code_from_page()
+            return True
+        poll_id[0] = GLib.timeout_add(500, _poll)
+
+    # Start polling after first page load (covers SSO redirect chains)
+    def _start_poll_after_first_load(_view, load_event):
+        if load_event == WebKit2.LoadEvent.FINISHED and poll_id[0] is None:
+            _schedule_poll()
+    web.connect("load-changed", _start_poll_after_first_load)
+
+    _dbg(f"Loading URL: {_login_window_url(store)}")
     web.load_uri(_login_window_url(store))
     win.present()
     try:
         loop.run()
     except KeyboardInterrupt:
         pass
+    if poll_id[0] is not None:
+        GLib.source_remove(poll_id[0])
     if not got["code"]:
+        _dbg("No code captured")
         emit({"type": "done", "ok": True, "store": store, "code": ""})
+    else:
+        _dbg("Login window closing with code")
 
 
 def _epic_offer_summary(el, now):
