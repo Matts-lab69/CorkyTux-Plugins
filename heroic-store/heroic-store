@@ -354,6 +354,234 @@ def _epic_desc(game: dict) -> str:
     return str(meta.get("description") or meta.get("shortDescription") or "")
 
 
+GAME_INFO_CACHE = CONFIG_DIR / "game_info_cache.json"
+GAME_INFO_TTL = 14 * 24 * 3600
+
+
+def _write_json(path: Path, data: dict):
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
+def _md_clean(s: str) -> str:
+    # Drop image embeds (with optional wrapping link), markdown links and
+    # bold/heading markers, then collapse blank runs so the store-content
+    # about text reads clean.
+    s = re.sub(r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)", "", s)
+    s = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", s)
+    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)
+    s = re.sub(r"[#>*_`]+", " ", s)
+    s = re.sub(r"[\s\u200b]+", " ", s)
+    return s.strip()
+
+
+def _epic_store_slug(match, title: str) -> str:
+    # Authoritative page slug wins; otherwise derive one from the title
+    #   (e.g. "Fall Guys" -> "fall-guys"). Games without a store-content
+    # product 404 and simply cascade to the next source.
+    if match is not None:
+        slug = _epic_page_slug(match)
+        if slug:
+            return slug
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")
+    return slug
+
+
+def _epic_store_content_desc(title: str, match) -> str:
+    # Public Epic CMS content, no auth: pages[].data.about.description /
+    # shortDescription / seo.description. May 404 for games without a
+    # store-content product (harmless -> empty -> next cascade level).
+    import urllib.request
+    slug = _epic_store_slug(match, title)
+    if not slug:
+        return ""
+    try:
+        url = f"https://store-content.ak.epicgames.com/api/en-US/content/products/{slug}"
+        req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return ""
+    best = ""
+    pages = data.get("pages") or []
+    for page in pages:
+        d = page.get("data") or {}
+        about = d.get("about") or {}
+        for key in ("description", "shortDescription"):
+            v = str(about.get(key) or "").strip()
+            if v and v != title:
+                best = best or v
+                break
+        if best:
+            break
+    if not best:
+        seo = ((page.get("data") or {}).get("seo") or {}).get("description") or ""
+        best = str(seo).strip()
+    return _md_clean(best)[:1500]
+
+
+_name_norm_re = re.compile(
+    r"(?i)\s*[-–—(]?\s*(Definitive|Game of the Year|GOTY|Deluxe|Gold|Ultimate"
+    r"|Collector'?s|Premium|Standard|Complete|Legendary|Anniversary|Remastered)"
+    r"\s*Edition\s*\)?\s*$")
+_name_norm_keep = re.compile(r"[^a-z0-9]+")
+
+
+def _name_norm(title: str) -> str:
+    # Bare game name for strict equality and Steam searches: drop ®/™ and
+    # edition suffixes, then compare case-insensitively, ignoring any non
+    # alphanumeric run so "Fall Guys" == "Fall-Guys" == "fallguys".
+    t = (title or "").replace("\u00ae", "").replace("\u2122", "").casefold()
+    t = _name_norm_re.sub("", t)
+    return _name_norm_keep.sub("", t)
+
+
+_steam_edition_terms = ("soundtrack", "demo", "dlc", "pack")
+
+
+def _steam_throttle():
+    # Steam public APIs have no SLA token; keep a >=1.5 s gap between
+    # consecutive requests and back off when we still get 429s.
+    import time as _t
+    _t.sleep(1.5)
+
+
+def _http_json(url: str, timeout: float = 15, attempts: int = 2):
+    import urllib.request
+    for attempt in range(attempts):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "CorkyTux/3.0.19 (+https://github.com/Matts-lab69/CorkyTux-Launcher)"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt + 1 < attempts:
+                import time as _t
+                _t.sleep(2.0 + attempt * 2.0)
+                continue
+            return None
+        except Exception:
+            return None
+    return None
+
+
+def _steam_find_appid(title: str) -> str:
+    # storesearch -> strict name equality on the normalized name, dropping
+    # OST/demo/DLC/pack suffixes ("DOOMBLADE Soundtrack" never wins over
+    # "DOOMBLADE"). Public API, no key. Returns appid or "".
+    import urllib.parse
+    q = urllib.parse.quote(title)
+    _steam_throttle()
+    data = _http_json(f"https://store.steampowered.com/api/storesearch/?term={q}&cc=US&l=english")
+    target = _name_norm(title)
+    for it in (data or {}).get("items") or []:
+        name = _name_norm(it.get("name") or "")
+        if name != target:
+            continue
+        if any(t in name for t in _steam_edition_terms):
+            continue
+        return str(it.get("id") or "")
+    return ""
+
+
+def _steam_desc(appid: str, lang: str) -> str:
+    # appdetails; keep only full games (type=="game", not a DLC), prefer
+    # short_description, fall back to about_the_game as plain text. If the
+    # requested language returns nothing usable, retry in English.
+    for lng in (lang, "english"):
+        _steam_throttle()
+        data = _http_json(f"https://store.steampowered.com/api/appdetails?appids={appid}&l={lng}&cc=US")
+        app = ((data or {}).get(appid) or {})
+        if not app.get("success"):
+            continue
+        info = app.get("data") or {}
+        if info.get("type") != "game" or bool(info.get("is_dlc")):
+            return ""
+        desc = str(info.get("short_description") or "").strip()
+        if not desc:
+            about = re.sub(r"<[^>]+>", " ", str(info.get("about_the_game") or ""))
+            desc = re.sub(r"\s+", " ", about).strip()
+        if desc:
+            return desc[:1500]
+    return ""
+
+
+def _wiki_lookup(title: str, lang: str):
+    # Wikipedia REST summary (no key, CC BY-SA). Try the bare title and the
+    # "(videojuego)" / "(video game)" disambiguator. Accept only a standard
+    # article (never a disambiguation/redlink) whose returned title matches
+    # after normalization and whose extract mentions being a video game.
+    # Returns (description, article_url).
+    import urllib.parse
+    wiki_lang = {"spanish": "es", "english": "en"}.get(lang, "es")
+    canons = {wiki_lang: "(videojuego)", "es": "(videojuego)", "en": "(video game)"}
+    cand = canons.get(wiki_lang, "(videojuego)")
+    target = _name_norm(title)
+    for cand_title in (title, f"{title} {cand}"):
+        enc = urllib.parse.quote(cand_title.replace(" ", "_"))
+        data = _http_json(f"https://{wiki_lang}.wikipedia.org/api/rest_v1/page/summary/{enc}", timeout=12)
+        if not isinstance(data, dict):
+            continue
+        if data.get("type") != "standard":
+            continue
+        got = _name_norm(data.get("title") or "")
+        if got != target:
+            continue
+        extract = str(data.get("extract") or "").strip()
+        kw = "video game" if wiki_lang == "en" else "videojuego"
+        if kw not in extract.casefold():
+            continue
+        if not extract:
+            return "", ""
+        page = data.get("content_urls", {}).get("desktop", {}).get("page") or \
+            f"https://{wiki_lang}.wikipedia.org/wiki/{cand_title.replace(' ', '_')}"
+        return extract[:1500], page
+    return "", ""
+
+
+GAME_INFO_TTL_POS = 14 * 24 * 3600
+GAME_INFO_TTL_NEG = 7 * 24 * 3600
+
+
+def _desc_cascade(app_id: str, title: str, lang: str, match):
+    # No description usable -> try, in order: Epic store-content (level 2),
+    # Steam (level 3), Wikipedia (level 4), version/date fallback. A hit at
+    # any level stops the cascade. Disk cache per app_name; positives live
+    # 14 days, "no result" misses 7 days, so a game is never re-queried
+    # more than once per window per source set. All network access happens
+    # here, off the GTK main loop, silently degrading to the next source.
+    import time as _t
+    cache = _read_json(GAME_INFO_CACHE)
+    if not isinstance(cache, dict):
+        cache = {}
+    now = _t.time()
+    disp = cache.get(app_id) or {}
+    if isinstance(disp, dict) and disp.get("ts"):
+        ttl = GAME_INFO_TTL_POS if disp.get("description") else GAME_INFO_TTL_NEG
+        if now - disp.get("ts", 0) < ttl:
+            return (disp.get("description") or "", disp.get("source") or "fallback",
+                    disp.get("source_url") or "")
+    desc = _epic_store_content_desc(title, match)
+    if desc:
+        source, source_url = "store", ""
+    else:
+        appid = _steam_find_appid(title)
+        desc = _steam_desc(appid, lang) if appid else ""
+        if desc:
+            source, source_url = "steam", f"https://store.steampowered.com/app/{appid}"
+        else:
+            desc, source_url = _wiki_lookup(title, lang)
+            source = "wikipedia" if desc else "fallback"
+            if not desc:
+                source_url = ""
+    cache[app_id] = {"ts": _t.time(), "description": desc, "source": source, "source_url": source_url}
+    _write_json(GAME_INFO_CACHE, cache)
+    return desc, source, source_url
+
+
 def cmd_game_info(args):
     store = args.store
     if store == "epic":
@@ -383,11 +611,25 @@ def cmd_game_info(args):
         if not store_url:
             # namespace-based /p/ URLs 404; a store search never does.
             store_url = _epic_search_url(title)
+        # A stub where the catalog description equals the title ("Fall
+        # Guys" -> "Fall Guys") counts as "no description": cascade to
+        # Epic store-content (level 2), Steam (level 3), Wikipedia
+        # (level 4) before the version/date fallback. The reported source
+        # is one of store | steam | wikipedia | fallback so the modal can
+        # attribute the real text ("Fuente: Steam", "Fuente: Wikipedia").
+        desc_source = "store" if desc else ""
+        source_url = ""
+        if not desc or desc.strip().casefold() == title.strip().casefold():
+            if desc and desc.strip().casefold() == title.strip().casefold():
+                desc = ""
+            desc, desc_source, source_url = _desc_cascade(g.get("app_name"), title, args.lang or "spanish", match)
         emit({"type": "done", "ok": True, "store": "epic", "info": {
             "app_id": g.get("app_name"), "title": title,
             "version": g.get("app_version", ""),
             "cover": _epic_cover(g),
             "description": desc[:1500],
+            "description_source": desc_source,
+            "source_url": source_url,
             "developer": str(meta.get("developer") or ""),
             "store_url": store_url,
         }})
@@ -1551,6 +1793,7 @@ def main():
     p_gi = sub.add_parser("game-info")
     p_gi.add_argument("--store", choices=["epic", "gog"], required=True)
     p_gi.add_argument("--app-id", required=True)
+    p_gi.add_argument("--lang", default="spanish")
     p_lw = sub.add_parser("login-window")
     p_lw.add_argument("--store", choices=["epic", "gog"], required=True)
     sub.add_parser("heroic-scan")
