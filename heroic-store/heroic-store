@@ -354,8 +354,17 @@ def _epic_desc(game: dict) -> str:
     return str(meta.get("description") or meta.get("shortDescription") or "")
 
 
-GAME_INFO_CACHE = CONFIG_DIR / "game_info_cache.json"
-GAME_INFO_TTL = 14 * 24 * 3600
+# --- per-app descriptions (single writer is this plugin) ---
+# descriptions.json keyed by app_id. A positive entry
+# {description, source, source_url, lang, saved_at} never expires and is
+# served with zero external requests; a "no result" marker
+# {no_description_checked_at} gates a redownload for NO_DESC_RETRY (7d).
+# Network failures (transport / 429 / 5xx) persist nothing, so the next
+# visit retries immediately. The legacy game_info_cache.json is migrated
+# on first load (positives keep their text, gain a lang) and removed.
+DESCRIPTIONS_FILE = CONFIG_DIR / "descriptions.json"
+DESCRIPTIONS_LEGACY = CONFIG_DIR / "game_info_cache.json"
+NO_DESC_RETRY = 7 * 24 * 3600
 
 
 def _write_json(path: Path, data: dict):
@@ -364,6 +373,55 @@ def _write_json(path: Path, data: dict):
         path.write_text(json.dumps(data))
     except OSError:
         pass
+
+
+def _write_json_atomic(path: Path, data: dict):
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _descriptions_load() -> dict:
+    data = _read_json(DESCRIPTIONS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    legacy = _read_json(DESCRIPTIONS_LEGACY)
+    if isinstance(legacy, dict) and legacy:
+        import time as _t
+        migrated = False
+        for app_id, e in legacy.items():
+            if app_id in data or not isinstance(e, dict):
+                continue
+            desc = e.get("description") or ""
+            if desc:
+                data[app_id] = {
+                    "description": desc,
+                    "source": e.get("source") or "fallback",
+                    "source_url": e.get("source_url") or "",
+                    "lang": "spanish",
+                    "saved_at": e.get("ts") or _t.time(),
+                }
+                migrated = True
+            elif e.get("ts"):
+                data[app_id] = {"no_description_checked_at": e.get("ts")}
+                migrated = True
+        if migrated:
+            _write_json_atomic(DESCRIPTIONS_FILE, data)
+        try:
+            DESCRIPTIONS_LEGACY.unlink()
+        except OSError:
+            pass
+    return data
+
+
+def _descriptions_save(app_id: str, entry: dict):
+    data = _descriptions_load()
+    data[app_id] = entry
+    _write_json_atomic(DESCRIPTIONS_FILE, data)
 
 
 def _md_clean(s: str) -> str:
@@ -390,11 +448,14 @@ def _epic_store_slug(match, title: str) -> str:
     return slug
 
 
-def _epic_store_content_desc(title: str, match) -> str:
+def _epic_store_content_desc(title: str, match, err=None) -> str:
     # Public Epic CMS content, no auth: pages[].data.about.description /
     # shortDescription / seo.description. May 404 for games without a
     # store-content product (harmless -> empty -> next cascade level).
+    # 429/5xx or transport errors are marked as network errors via err so
+    # callers persist nothing.
     import urllib.request
+    import urllib.error
     slug = _epic_store_slug(match, title)
     if not slug:
         return ""
@@ -403,7 +464,13 @@ def _epic_store_content_desc(title: str, match) -> str:
         req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if err is not None and (e.code == 429 or e.code >= 500):
+            err["network"] = True
+        return ""
     except Exception:
+        if err is not None:
+            err["network"] = True
         return ""
     best = ""
     pages = data.get("pages") or []
@@ -449,7 +516,10 @@ def _steam_throttle():
     _t.sleep(1.5)
 
 
-def _http_json(url: str, timeout: float = 15, attempts: int = 2):
+def _http_json(url: str, timeout: float = 15, attempts: int = 2, err=None):
+    # err: optional dict mutated with {"network": True} on any failure that
+    # should count as a network problem (transport, 429, 5xx) so callers
+    # persist nothing; a clean 404/empty payload is not a network error.
     import urllib.request
     for attempt in range(attempts):
         try:
@@ -462,20 +532,24 @@ def _http_json(url: str, timeout: float = 15, attempts: int = 2):
                 import time as _t
                 _t.sleep(2.0 + attempt * 2.0)
                 continue
+            if err is not None and (e.code == 429 or e.code >= 500):
+                err["network"] = True
             return None
         except Exception:
+            if err is not None:
+                err["network"] = True
             return None
     return None
 
 
-def _steam_find_appid(title: str) -> str:
+def _steam_find_appid(title: str, err=None) -> str:
     # storesearch -> strict name equality on the normalized name, dropping
     # OST/demo/DLC/pack suffixes ("DOOMBLADE Soundtrack" never wins over
     # "DOOMBLADE"). Public API, no key. Returns appid or "".
     import urllib.parse
     q = urllib.parse.quote(title)
     _steam_throttle()
-    data = _http_json(f"https://store.steampowered.com/api/storesearch/?term={q}&cc=US&l=english")
+    data = _http_json(f"https://store.steampowered.com/api/storesearch/?term={q}&cc=US&l=english", err=err)
     target = _name_norm(title)
     for it in (data or {}).get("items") or []:
         name = _name_norm(it.get("name") or "")
@@ -487,13 +561,13 @@ def _steam_find_appid(title: str) -> str:
     return ""
 
 
-def _steam_desc(appid: str, lang: str) -> str:
+def _steam_desc(appid: str, lang: str, err=None) -> str:
     # appdetails; keep only full games (type=="game", not a DLC), prefer
     # short_description, fall back to about_the_game as plain text. If the
     # requested language returns nothing usable, retry in English.
     for lng in (lang, "english"):
         _steam_throttle()
-        data = _http_json(f"https://store.steampowered.com/api/appdetails?appids={appid}&l={lng}&cc=US")
+        data = _http_json(f"https://store.steampowered.com/api/appdetails?appids={appid}&l={lng}&cc=US", err=err)
         app = ((data or {}).get(appid) or {})
         if not app.get("success"):
             continue
@@ -509,7 +583,7 @@ def _steam_desc(appid: str, lang: str) -> str:
     return ""
 
 
-def _wiki_lookup(title: str, lang: str):
+def _wiki_lookup(title: str, lang: str, err=None):
     # Wikipedia REST summary (no key, CC BY-SA). Try the bare title and the
     # "(videojuego)" / "(video game)" disambiguator. Accept only a standard
     # article (never a disambiguation/redlink) whose returned title matches
@@ -522,7 +596,7 @@ def _wiki_lookup(title: str, lang: str):
     target = _name_norm(title)
     for cand_title in (title, f"{title} {cand}"):
         enc = urllib.parse.quote(cand_title.replace(" ", "_"))
-        data = _http_json(f"https://{wiki_lang}.wikipedia.org/api/rest_v1/page/summary/{enc}", timeout=12)
+        data = _http_json(f"https://{wiki_lang}.wikipedia.org/api/rest_v1/page/summary/{enc}", timeout=12, err=err)
         if not isinstance(data, dict):
             continue
         if data.get("type") != "standard":
@@ -542,43 +616,51 @@ def _wiki_lookup(title: str, lang: str):
     return "", ""
 
 
-GAME_INFO_TTL_POS = 14 * 24 * 3600
-GAME_INFO_TTL_NEG = 7 * 24 * 3600
-
-
-def _desc_cascade(app_id: str, title: str, lang: str, match):
+def _desc_cascade(app_id: str, title: str, lang: str, match, force: bool = False):
     # No description usable -> try, in order: Epic store-content (level 2),
-    # Steam (level 3), Wikipedia (level 4), version/date fallback. A hit at
-    # any level stops the cascade. Disk cache per app_name; positives live
-    # 14 days, "no result" misses 7 days, so a game is never re-queried
-    # more than once per window per source set. All network access happens
-    # here, off the GTK main loop, silently degrading to the next source.
+    # Steam (level 3), Wikipedia (level 4). A hit at any level stops the
+    # cascade and is persisted to descriptions.json (source, source_url,
+    # lang, saved_at). A miss on every level persists nothing for genuine
+    # network failures, and a {no_description_checked_at} marker otherwise
+    # (retried after NO_DESC_RETRY). force=True ignores the marker and
+    # re-runs the cascade; a network failure keeps any previous entry.
+    # All network access happens here, off the GTK main loop.
     import time as _t
-    cache = _read_json(GAME_INFO_CACHE)
-    if not isinstance(cache, dict):
-        cache = {}
     now = _t.time()
-    disp = cache.get(app_id) or {}
-    if isinstance(disp, dict) and disp.get("ts"):
-        ttl = GAME_INFO_TTL_POS if disp.get("description") else GAME_INFO_TTL_NEG
-        if now - disp.get("ts", 0) < ttl:
-            return (disp.get("description") or "", disp.get("source") or "fallback",
-                    disp.get("source_url") or "")
-    desc = _epic_store_content_desc(title, match)
+    disp = _descriptions_load().get(app_id) or {}
+    if not isinstance(disp, dict):
+        disp = {}
+    if disp.get("no_description_checked_at") and not force:
+        if now - float(disp.get("no_description_checked_at", 0)) < NO_DESC_RETRY:
+            return "", "fallback", ""
+    err = {"network": False}
+    desc = _epic_store_content_desc(title, match, err=err)
     if desc:
         source, source_url = "store", ""
     else:
-        appid = _steam_find_appid(title)
-        desc = _steam_desc(appid, lang) if appid else ""
+        appid = _steam_find_appid(title, err=err)
+        desc = _steam_desc(appid, lang, err=err) if appid else ""
         if desc:
             source, source_url = "steam", f"https://store.steampowered.com/app/{appid}"
         else:
-            desc, source_url = _wiki_lookup(title, lang)
+            desc, source_url = _wiki_lookup(title, lang, err=err)
             source = "wikipedia" if desc else "fallback"
             if not desc:
                 source_url = ""
-    cache[app_id] = {"ts": _t.time(), "description": desc, "source": source, "source_url": source_url}
-    _write_json(GAME_INFO_CACHE, cache)
+    if desc:
+        _descriptions_save(app_id, {
+            "description": desc, "source": source, "source_url": source_url,
+            "lang": lang, "saved_at": now,
+        })
+    elif err["network"]:
+        # Network failure and no new text: save nothing; when force asked
+        # for a refresh, keep any previously saved positive entry.
+        if disp.get("description"):
+            return (disp.get("description") or "", disp.get("source") or "fallback",
+                    disp.get("source_url") or "")
+    else:
+        # Genuine miss (no text in any source): persist only the marker.
+        _descriptions_save(app_id, {"no_description_checked_at": now})
     return desc, source, source_url
 
 
@@ -597,6 +679,45 @@ def cmd_game_info(args):
             die(2, "Game not in Epic library")
         meta = g.get("metadata") or {}
         title = str(g.get("app_title") or "")
+        app_id = g.get("app_name") or ""
+        force = bool(getattr(args, "force_description", False))
+        lang = args.lang or "spanish"
+        saved = _descriptions_load().get(app_id) or {}
+        if not isinstance(saved, dict):
+            saved = {}
+        saved_desc = saved.get("description") or ""
+        # A saved positive wins with zero external requests and never
+        # expires (all source requests come from descriptive sources; the
+        # legendary list below is local).
+        if not force and saved_desc:
+            emit({"type": "done", "ok": True, "store": "epic", "info": {
+                "app_id": app_id, "title": title,
+                "version": g.get("app_version", ""),
+                "cover": _epic_cover(g),
+                "description": saved_desc[:1500],
+                "description_source": saved.get("source") or "fallback",
+                "source_url": saved.get("source_url") or "",
+                "description_lang": saved.get("lang") or lang,
+                "developer": str(meta.get("developer") or ""),
+                "store_url": _epic_search_url(title),
+            }})
+            return
+        # A recent "no result" marker is also served offline; the refresh
+        # button ("force") ignores it and re-runs the cascade.
+        import time as _t
+        if not force and saved.get("no_description_checked_at"):
+            if _t.time() - float(saved.get("no_description_checked_at", 0)) < NO_DESC_RETRY:
+                emit({"type": "done", "ok": True, "store": "epic", "info": {
+                    "app_id": app_id, "title": title,
+                    "version": g.get("app_version", ""),
+                    "cover": _epic_cover(g),
+                    "description": "", "description_source": "fallback",
+                    "source_url": "",
+                    "description_lang": lang,
+                    "developer": str(meta.get("developer") or ""),
+                    "store_url": _epic_search_url(title),
+                }})
+                return
         desc = _epic_desc(g) or str(meta.get("longDescription") or "")
         store_url = ""
         try:
@@ -614,22 +735,31 @@ def cmd_game_info(args):
         # A stub where the catalog description equals the title ("Fall
         # Guys" -> "Fall Guys") counts as "no description": cascade to
         # Epic store-content (level 2), Steam (level 3), Wikipedia
-        # (level 4) before the version/date fallback. The reported source
-        # is one of store | steam | wikipedia | fallback so the modal can
-        # attribute the real text ("Fuente: Steam", "Fuente: Wikipedia").
+        # (level 4). The reported source is one of store | steam |
+        # wikipedia | fallback so the modal can attribute the real text.
         desc_source = "store" if desc else ""
         source_url = ""
+        from_cascade = False
         if not desc or desc.strip().casefold() == title.strip().casefold():
             if desc and desc.strip().casefold() == title.strip().casefold():
                 desc = ""
-            desc, desc_source, source_url = _desc_cascade(g.get("app_name"), title, args.lang or "spanish", match)
+            desc, desc_source, source_url = _desc_cascade(app_id, title, lang, match, force=force)
+            from_cascade = True
+        # Persist any real text that did not come from the cascade (which
+        # already saved it): e.g. legendary/catalog level-1 descriptions.
+        if desc and not from_cascade:
+            _descriptions_save(app_id, {
+                "description": desc, "source": desc_source, "source_url": source_url,
+                "lang": lang, "saved_at": _t.time(),
+            })
         emit({"type": "done", "ok": True, "store": "epic", "info": {
-            "app_id": g.get("app_name"), "title": title,
+            "app_id": app_id, "title": title,
             "version": g.get("app_version", ""),
             "cover": _epic_cover(g),
             "description": desc[:1500],
             "description_source": desc_source,
             "source_url": source_url,
+            "description_lang": lang,
             "developer": str(meta.get("developer") or ""),
             "store_url": store_url,
         }})
@@ -688,6 +818,18 @@ def cmd_library(args):
                 installed = {g.get("app_name") for g in json.loads(proc2.stdout or "[]")}
         except (ValueError, subprocess.TimeoutExpired):
             pass
+        # Prune descriptions.json entries whose app_id left the Epic
+        # library. Only run when the list arrived complete and without
+        # error (we are here only after a successful parse); if the list
+        # somehow came back empty, keep everything rather than wipe.
+        current_ids = {g.get("app_name") for g in games if g.get("app_name")}
+        if current_ids:
+            data = _descriptions_load()
+            stale = set(data) - current_ids
+            if stale:
+                for k in stale:
+                    del data[k]
+                _write_json_atomic(DESCRIPTIONS_FILE, data)
         emit({"type": "done", "ok": True, "store": "epic", "games": [
             {"app_id": g.get("app_name"), "title": g.get("app_title"),
              "version": g.get("app_version", ""),
@@ -1794,6 +1936,8 @@ def main():
     p_gi.add_argument("--store", choices=["epic", "gog"], required=True)
     p_gi.add_argument("--app-id", required=True)
     p_gi.add_argument("--lang", default="spanish")
+    p_gi.add_argument("--force-description", action="store_true",
+                      help="ignore any saved/negative entry and re-run the cascade")
     p_lw = sub.add_parser("login-window")
     p_lw.add_argument("--store", choices=["epic", "gog"], required=True)
     sub.add_parser("heroic-scan")
