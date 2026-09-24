@@ -67,7 +67,10 @@ def emit(event: dict):
 
 
 def die(code: int, message: str):
-    emit({"type": "error", "message": message})
+    # `code` lets the launcher differentiate error kinds (e.g. no suffix
+    # "(codes expire fast...)" when the binary is missing). The launcher's
+    # JSON parser ignores unknown fields, so this stays backward compatible.
+    emit({"type": "error", "code": code, "message": message})
     sys.exit(code)
 
 
@@ -150,6 +153,7 @@ def _epic_account_name():
 
 
 def _gog_account_name():
+    # Real session check: refresh -> access token -> userData.json -> username.
     access = _gog_access_token()
     if not access:
         return ""
@@ -163,6 +167,12 @@ def _gog_account_name():
         return str(data.get("username", ""))
     except Exception:
         return ""
+
+
+def _gog_logged_in() -> str:
+    """Real GOG session check (refresh -> access token -> userData.json ->
+    username). Returns the account name, or "" when the session is dead."""
+    return _gog_account_name()
 
 
 STATUS_CACHE = CONFIG_DIR / ".status_cache.json"
@@ -311,28 +321,49 @@ def cmd_auth(args):
         _auth_dbg(f"auth gog: code len={len(code)} (raw len={len(raw)})")
         proc = subprocess.run([GOGDL_BIN, "auth", "--code", code],
                               capture_output=True, text=True, timeout=120)
-        _auth_dbg(f"gogdl auth rc={proc.returncode} err={(proc.stderr or proc.stdout or '').strip()[-200:]}")
+        err = (proc.stderr or proc.stdout or "").strip()
+        _auth_dbg(f"gogdl auth rc={proc.returncode} err_len={len(err)}")
         if proc.returncode != 0:
-            die(4, f"gogdl auth failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
-        if not _gog_exchange(code):
-            _auth_dbg("exchange FAILED")
-            die(4, "GOG token exchange failed: the code was rejected or expired (codes last ~1 min). Open ONE fresh tab and retry.")
-        _auth_dbg("exchange OK, emitting done")
-        emit({"type": "done", "ok": True, "store": "gog"})
+            # "expired"/"invalid" in gogdl's stderr are only hints; fall back
+            # to the generic message with the stderr tail when they don't match.
+            low = err.lower()
+            if "expired" in low or "invalid" in low:
+                die(4, "The code was rejected as invalid or expired (codes last ~1 min): " + err[-160:])
+            die(4, f"gogdl auth failed: {err[-300:]}")
+        ex = _gog_exchange(code)
+        if ex == "network":
+            _auth_dbg("exchange: network")
+            die(6, "No network connection or GOG is unreachable — check your connection and retry.")
+        if ex != "ok":
+            _auth_dbg("exchange: rejected")
+            die(4, "GOG rejected the code: invalid or expired (codes last ~1 min). Open ONE fresh tab and retry.")
+        _auth_dbg("exchange OK, checking real session")
+        account = _gog_logged_in()
+        if not account:
+            _auth_dbg("session check failed")
+            die(4, "Login completed but the GOG session could not be confirmed (userData check failed). Retry with a fresh code, or check your network.")
+        _auth_dbg("session check OK, emitting done")
+        emit({"type": "done", "ok": True, "store": "gog", "account": account})
         return
-    _auth_dbg("auth gog: no code — opening system browser")
-    webbrowser.open(GOG_LOGIN_URL)
+    # No code on purpose: the launcher opens the browser (webbrowser.open was
+    # removed so the tab is opened exactly once, by the launcher).
+    _auth_dbg("auth gog: no code — emitting auth_url (launcher opens the browser)")
     emit({"type": "auth_url", "store": "gog", "url": GOG_LOGIN_URL,
           "instructions": "1) Log in to GOG in that browser tab. 2) After login you land on embed.gog.com/on_login_success?code=... — copy the 'code' value (or the whole final URL; the app accepts both). 3) Paste it in the 'Or paste code manually' box in the launcher and click Confirm code. The code expires in ~1 minute."})
 
 
-def _gog_exchange(code: str) -> bool:
+def _gog_exchange(code: str) -> str:
     """Exchange the OAuth authorization code for a refresh token and persist
-    it. Returns False (with a log line) on any failure instead of silently
-    swallowing it, so a 'successful' login can never end up without a saved
-    session."""
+    it. Returns:
+      "ok"       — refresh token saved (persisted session),
+      "network"  — GOG unreachable / connection error,
+      "rejected" — the code was invalid, expired, or the response carried no
+                   refresh_token.
+    Logs only steps, string lengths and return codes — never code or token
+    values."""
     import urllib.request
     import urllib.parse
+    import urllib.error
     try:
         data = urllib.parse.urlencode({
             "client_id": GOG_CLIENT_ID,
@@ -345,27 +376,39 @@ def _gog_exchange(code: str) -> bool:
         with urllib.request.urlopen(req, timeout=30) as resp:
             tok = json.loads(resp.read().decode())
         if not tok.get("refresh_token"):
-            _dbg(f"_gog_exchange: response sin refresh_token: {str(tok)[:200]}")
-            return False
+            _auth_dbg("exchange: no refresh_token in response (keys="
+                      + str(sorted(tok.keys())) + ")")
+            return "rejected"
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         GOG_TOKEN_JSON.write_text(json.dumps({"refresh_token": tok["refresh_token"]}))
         try:
             os.chmod(GOG_TOKEN_JSON, 0o600)
         except OSError:
             pass
-        return True
+        _auth_dbg("exchange: refresh_token persisted (len="
+                  + str(len(tok["refresh_token"])) + ")")
+        return "ok"
+    except urllib.error.URLError as e:
+        _auth_dbg(f"exchange: network error: {e}")
+        return "network"
+    except TimeoutError:
+        _auth_dbg("exchange: network timeout")
+        return "network"
     except Exception as e:
-        _dbg(f"_gog_exchange failed: {e}")
-        return False
+        _auth_dbg(f"exchange: rejected ({type(e).__name__})")
+        return "rejected"
 
 
 def _gog_access_token():
     import urllib.request
     import urllib.parse
+    import urllib.error
     tok = _read_json(GOG_TOKEN_JSON)
     refresh = (tok or {}).get("refresh_token", "")
     if not refresh:
+        _auth_dbg("access_token: no refresh_token saved")
         return ""
+    _auth_dbg("access_token: refresh len=" + str(len(refresh)))
     try:
         data = urllib.parse.urlencode({
             "client_id": GOG_CLIENT_ID,
@@ -375,8 +418,17 @@ def _gog_access_token():
         req = urllib.request.Request("https://auth.gog.com/token", data=data,
                                      headers={"User-Agent": "CorkyTux/3.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode()).get("access_token", "")
-    except Exception:
+            at = json.loads(resp.read().decode()).get("access_token", "")
+        _auth_dbg("access_token: obtained (len=" + str(len(at)) + ")")
+        return at
+    except urllib.error.URLError as e:
+        _auth_dbg(f"access_token: network error: {e}")
+        return ""
+    except TimeoutError:
+        _auth_dbg("access_token: network timeout")
+        return ""
+    except Exception as e:
+        _auth_dbg(f"access_token: error ({type(e).__name__})")
         return ""
 
 
