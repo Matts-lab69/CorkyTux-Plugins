@@ -1698,13 +1698,7 @@ def _login_window_url(store: str) -> str:
                 + quote("http://localhost/launcher/authorized", safe="")
                 + "&responseType=code"
                 + "&display=popup")  # inline forward (same view), never window.open
-    # CORKYTUX_GOG_LAYOUT probes whether GOG has a layout that renders the
-    # social login inline the way Epic's &display=popup does. Unset (or empty)
-    # keeps layout=client2. GOG only: this function is not used for epic.
-    layout = os.environ.get("CORKYTUX_GOG_LAYOUT", "").strip()
-    if not layout:
-        return GOG_LOGIN_URL
-    return GOG_LOGIN_URL.replace("layout=client2", "layout=" + layout)
+    return GOG_LOGIN_URL
 
 
 def _query_param(url: str, key: str) -> str:
@@ -1896,54 +1890,6 @@ def cmd_login_window(args):
     web.set_vexpand(True)
     web.set_hexpand(True)
 
-    # --- Experimental social login in this same view (GOG only) ---
-    # Epic needs none of this: its URL carries &display=popup, which makes
-    # Epic render the provider "forward" INLINE in the same view, so it never
-    # asks for a second window. GOG has no such parameter, so its social
-    # buttons use window.open / target=_blank. Two env toggles (GOG only,
-    # unset = current behaviour) let us probe that without a rebuild:
-    #   CORKYTUX_GOG_SAMEWIN=1 -> inject the same-window shim below
-    #   CORKYTUX_GOG_LAYOUT=<v> -> replace layout=client2 in the login URL
-    # The popup blocks (decide-policy + create) stay as the safety net either
-    # way, and the on_login_success capture is untouched.
-    samewin = store == "gog" and os.environ.get("CORKYTUX_GOG_SAMEWIN") == "1"
-    _dbg(f"toggles: samewin={'on' if samewin else 'off'} "
-         f"layout={os.environ.get('CORKYTUX_GOG_LAYOUT') or 'default'}")
-    if samewin:
-        # UserContentManager of the view: user-content-manager is
-        # construct-only in WebKit-6.0.gir, so the default manager is taken
-        # from the getter and the script is added to it (add_script, gir
-        # 20177). UserScript.new (gir 20987, "Creates a new user script")
-        # injects into the PAGE's own world -- that is what makes it able to
-        # replace the page's window.open. new_for_world (gir 21054, "for
-        # script world with name @world_name") would inject into a separate
-        # named world, where patching window.open would have NO effect.
-        _SAMEWIN_JS = """(function(){
-try {
-  window.open = function(url) {
-    try { if (url) { window.location.assign(url); } } catch(e) {}
-    return window;
-  };
-  document.addEventListener("click", function(ev) {
-    try {
-      var a = ev.target && ev.target.closest && ev.target.closest("a[target]");
-      if (a) { a.setAttribute("target", "_self"); }
-    } catch(e) {}
-  }, true);
-} catch(e) {}
-})();"""
-        try:
-            _script = WebKit2.UserScript.new(
-                _SAMEWIN_JS,
-                WebKit2.UserContentInjectedFrames.TOP_FRAME,
-                WebKit2.UserScriptInjectionTime.START,
-                None, None)
-            web.get_user_content_manager().add_script(_script)
-            _dbg("samewin: shim injected (window.open -> location.assign, target=_blank removed)")
-        except Exception as e:
-            samewin = False
-            _dbg(f"samewin: shim not injected ({e})")
-
     def _relax_storage(ns):
         """Allow persistent credentials + third-party cookies so reCAPTCHA and
         the SSO popup pages work inside the embedded view. Each call is
@@ -1983,23 +1929,12 @@ try {
         except Exception as e:
             _dbg(f"set_user_agent failed: {e}")
     else:
-        # GOG UA: CORKYTUX_GOG_UA env override (the plugin inherits the
-        # launcher's environment — spawn_streaming_inner builds Command
-        # without .env()/.env_clear(), so CORKYTUX_GOG_UA=default keeps
-        # WebKit's own UA, any other value is used verbatim, and unset
-        # keeps the prior Safari override for reCAPTCHA).
-        ua_gog = os.environ.get("CORKYTUX_GOG_UA", "")
+        # GOG keeps its Safari-shaped UA: reCAPTCHA loads fine with it (every
+        # recaptcha.net/gstatic resource answered 200 in the runtime logs) and
+        # it is what the page expects from a desktop client.
         try:
             s = web.get_settings()
-            if ua_gog == "default":
-                _dbg("GOG UA: CORKYTUX_GOG_UA=default -> keep WebKit default (no set_user_agent)")
-            elif ua_gog:
-                s.set_user_agent(ua_gog)
-                _dbg(f"GOG UA: overridden via CORKYTUX_GOG_UA (len={len(ua_gog)})")
-            else:
-                s.set_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
-                _dbg("GOG UA: default Safari override (CORKYTUX_GOG_UA unset)")
-            _dbg(f"GOG UA active: {s.get_user_agent()}")
+            s.set_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
         except Exception as e:
             _dbg(f"GOG UA setup failed: {e}")
 
@@ -2103,15 +2038,9 @@ try {
     # popup + provider SSO), reload the opener so the login window stays alive
     # instead of showing a dead blank page. Capped at 2 reloads.
     _terminations = [0]
-    # Hosts of the social providers whose pages kill the shared web process
-    # (Google's reCAPTCHA is the observed crasher, both in a popup and in the
-    # same view). Hostname only.
-    _PROVIDER_HOSTS = ("accounts.google.com", "accounts.youtube.com",
-                        "steamcommunity.com", "login.live.com",
-                        "discord.com", "external-accounts.gog.com")
     def on_web_process_terminated(_w, reason):
         # Bounded: a page that keeps killing the shared process must not put
-        # the window in a recovery loop. Two attempts, then stop and tell the
+        # the window in a reload loop. Two attempts, then stop and tell the
         # user.
         _terminations[0] += 1
         n = _terminations[0]
@@ -2125,24 +2054,6 @@ try {
                 pass
             return
         host = _host_of(web.get_uri() or "")
-        if store == "gog" and host in _PROVIDER_HOSTS:
-            # Reloading the opener here just re-requests the provider page
-            # that is crashing, and the user lands back on the GOG login form
-            # with the provider state lost. Go to GOG's own form instead and
-            # say what happened. Counts as one of the two attempts.
-            _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) host={host} - "
-                 f"provider crash, loading GOG login again ({n}/2)")
-            try:
-                hint.set_text("Google/social login crashed in this window; "
-                              "use email/password or the browser method "
-                              "(Log in, then paste the code)")
-            except Exception:
-                pass
-            try:
-                web.load_uri(GOG_LOGIN_URL)
-            except Exception as e:
-                _dbg(f"recovery load of GOG login failed: {e}")
-            return
         _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) host={host} "
              f"- reloading opener ({n}/2)")
         try:
@@ -2161,9 +2072,7 @@ try {
     # monitorizando cada recurso con sus señales propias finished/failed +
     # get_response()/get_status_code(). URIs siempre vía _sani_uri.
     WATCH_HOSTS = ("gog.com", "recaptcha.net", "gstatic.com",
-                   "external-accounts.gog.com", "google.com",
-                   "accounts.google.com", "steamcommunity.com",
-                   "login.live.com", "discord.com")
+                   "external-accounts.gog.com")
 
     def _watch_host(uri):
         try:
