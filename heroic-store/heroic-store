@@ -71,6 +71,18 @@ def die(code: int, message: str):
     sys.exit(code)
 
 
+def _auth_dbg(msg):
+    """Trace the manual auth flow (browser + pasted code) to a log file so a
+    failed login is diagnosable: the login-window flow logs to
+    /tmp/corkytux_sso_debug.log, this one logs to /tmp/corkytux_auth_debug.log."""
+    try:
+        import time
+        with open("/tmp/corkytux_auth_debug.log", "a") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+
 def _require_binary(path: str, name: str):
     if not Path(path).exists() and shutil.which(name) is None:
         die(5, f"{name} not found. Run `setup` to download it, or place it at {path}")
@@ -285,17 +297,33 @@ def cmd_auth(args):
         return
     _require_binary(GOGDL_BIN, "gogdl")
     if args.code:
-        proc = subprocess.run([GOGDL_BIN, "auth", "--code", args.code],
+        import urllib.parse as _up
+        raw = args.code.strip().strip('"').strip("'")
+        code = raw
+        # Tolerate pasting the whole final URL (or its query/fragment) instead
+        # of the bare code value — the most common copy-paste mistake.
+        if "://" in raw or raw.startswith(("?", "#")):
+            parsed = _up.urlparse(raw if "://" in raw else "https://x/" + raw)
+            code = (_up.parse_qs(parsed.query).get("code")
+                    or _up.parse_qs(parsed.fragment).get("code") or [""])[0]
+        if not code:
+            die(4, "No valid code found — copy the value of 'code' from the final URL (it expires in ~1 min) and paste just that.")
+        _auth_dbg(f"auth gog: code len={len(code)} (raw len={len(raw)})")
+        proc = subprocess.run([GOGDL_BIN, "auth", "--code", code],
                               capture_output=True, text=True, timeout=120)
+        _auth_dbg(f"gogdl auth rc={proc.returncode} err={(proc.stderr or proc.stdout or '').strip()[-200:]}")
         if proc.returncode != 0:
             die(4, f"gogdl auth failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
-        if not _gog_exchange(args.code):
+        if not _gog_exchange(code):
+            _auth_dbg("exchange FAILED")
             die(4, "GOG token exchange failed: the code was rejected or expired (codes last ~1 min). Open ONE fresh tab and retry.")
+        _auth_dbg("exchange OK, emitting done")
         emit({"type": "done", "ok": True, "store": "gog"})
         return
+    _auth_dbg("auth gog: no code — opening system browser")
     webbrowser.open(GOG_LOGIN_URL)
     emit({"type": "auth_url", "store": "gog", "url": GOG_LOGIN_URL,
-          "instructions": "Log in, then copy the 'code' param from the final URL and paste it in the launcher box below."})
+          "instructions": "1) Log in to GOG in that browser tab. 2) After login you land on embed.gog.com/on_login_success?code=... — copy the 'code' value (or the whole final URL; the app accepts both). 3) Paste it in the 'Or paste code manually' box in the launcher and click Confirm code. The code expires in ~1 minute."})
 
 
 def _gog_exchange(code: str) -> bool:
