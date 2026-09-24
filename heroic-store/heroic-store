@@ -927,6 +927,27 @@ def _describe_game(app_id: str, title: str, lang: str, g, match) -> bool:
     return False
 
 
+def cmd_installed_status(args):
+    """Local-only installed check: store registry + disk existence, NEVER
+    network. Emits the same installed/stale flags the full `library`
+    command computes (same `_installed_status`/`_gog_installed_status`
+    criterion), so the launcher can refresh Store tile badges/buttons in
+    place without re-rendering or hitting the network."""
+    if args.store == "epic":
+        status = _installed_status()
+    else:
+        status = _gog_installed_status()
+    installed = {
+        app: {"installed": bool(st.get("installed")),
+              "stale_registry": bool(st.get("stale")),
+              "install_path": str(st.get("install_path") or ""),
+              "executable": str(st.get("executable") or "")}
+        for app, st in status.items()
+    }
+    emit({"type": "done", "ok": True, "store": args.store,
+          "installed": installed})
+
+
 def cmd_refresh_library(args):
     # Batch "invalidate and re-resolve": mirrors library() for the grid,
     # then re-runs the per-game description resolution for every game in
@@ -2112,6 +2133,8 @@ def main():
     p_lib = sub.add_parser("library")
     p_lib.add_argument("--store", choices=["epic", "gog"], required=True)
     p_lib.add_argument("--refresh", action="store_true")
+    p_is = sub.add_parser("installed-status")
+    p_is.add_argument("--store", choices=["epic", "gog"], required=True)
     p_rl = sub.add_parser("refresh-library")
     p_rl.add_argument("--store", choices=["epic", "gog"], required=True)
     p_rl.add_argument("--lang", default="spanish")
@@ -2153,6 +2176,7 @@ def main():
         "auth": cmd_auth,
         "logout": cmd_logout,
         "library": cmd_library,
+        "installed-status": cmd_installed_status,
         "refresh-library": cmd_refresh_library,
         "free-promos": cmd_free_promos,
         "epic-deals": cmd_epic_deals,
