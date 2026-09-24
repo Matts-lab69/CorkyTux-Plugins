@@ -1668,11 +1668,50 @@ def _query_param(url: str, key: str) -> str:
         return ""
 
 
-def _dbg(msg):
-    """Write a debug line to /tmp/corkytux_sso_debug.log."""
+_LOG_FILE = CONFIG_DIR / "sso_debug.log"
+
+def _log_safe(msg: str) -> bool:
+    """True when the line carries no credential/code material. Applied inside
+    _dbg as a last-resort filter so even an accidental sensitive value never
+    reaches the log file."""
+    low = msg.lower()
+    return not any(k in low for k in ("code=", "authorization", "password",
+                                      "token", "secret"))
+
+
+def _sani_uri(uri: str, limit: int = 120) -> str:
+    """URIs are logged WITHOUT query nor fragment (they can carry code=,
+    token or other secret params). Never log a raw URI."""
     try:
-        with open("/tmp/corkytux_sso_debug.log", "a") as f:
-            import time
+        import urllib.parse as _up
+        p = _up.urlparse(uri)
+        if not p.netloc:
+            return uri[:limit]
+        hostpath = (f"{p.scheme}://{p.netloc}{p.path}" if p.scheme
+                    else f"{p.netloc}{p.path}")
+        return hostpath[:limit]
+    except Exception:
+        return uri[:limit]
+
+
+def _host_of(uri: str) -> str:
+    """Hostname only — safe for logs: no path, no query, no fragment."""
+    try:
+        import urllib.parse as _up
+        return _up.urlparse(uri).hostname or ""
+    except Exception:
+        return ""
+
+
+def _dbg(msg):
+    """Write a debug line to CONFIG_DIR/sso_debug.log (0600)."""
+    try:
+        import time
+        if not _log_safe(msg):
+            return
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_LOG_FILE, "a") as f:
+            os.chmod(_LOG_FILE, 0o600)
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception:
         pass
@@ -1693,9 +1732,12 @@ def cmd_login_window(args):
     store = args.store
     got = {"code": ""}
 
-    # Clear previous debug log
+    # Clear previous debug log (config dir, 0600)
     try:
-        open("/tmp/corkytux_sso_debug.log", "w").close()
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_LOG_FILE, "w") as f:
+            os.chmod(_LOG_FILE, 0o600)
+            f.write("")
     except Exception:
         pass
     _dbg(f"=== LOGIN WINDOW OPENED store={store} ===")
@@ -1747,7 +1789,9 @@ def cmd_login_window(args):
             try:
                 val = grw.evaluate_javascript_finish(res)
                 text = val.to_string().strip() if val else ""
-                _dbg(f"Page body len={len(text)}, first300={text[:300]!r}")
+                # Page CONTENT is never logged (it can hold credentials or a
+                # code): only its length and the page host, no query/fragment.
+                _dbg(f"Page body len={len(text)} host={_host_of(target.get_uri() or '')}")
                 if not text:
                     return
                 # Try JSON parse (Epic id/api/redirect returns JSON)
@@ -1776,7 +1820,7 @@ def cmd_login_window(args):
     def try_extract_code_from_uri(uri: str) -> bool:
         code = code_in_uri(uri)
         if code:
-            _dbg(f"Found code in URI: {str(code)[:12]}... uri={uri[:120]}")
+            _dbg(f"Found code in URI: {str(code)[:12]}... uri={_sani_uri(uri)}")
             finish(str(code))
             return True
         return False
@@ -1843,11 +1887,25 @@ def cmd_login_window(args):
         except Exception as e:
             _dbg(f"set_user_agent failed: {e}")
     else:
+        # GOG UA: CORKYTUX_GOG_UA env override (the plugin inherits the
+        # launcher's environment — spawn_streaming_inner builds Command
+        # without .env()/.env_clear(), so CORKYTUX_GOG_UA=default keeps
+        # WebKit's own UA, any other value is used verbatim, and unset
+        # keeps the prior Safari override for reCAPTCHA).
+        ua_gog = os.environ.get("CORKYTUX_GOG_UA", "")
         try:
             s = web.get_settings()
-            s.set_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
-        except Exception:
-            pass
+            if ua_gog == "default":
+                _dbg("GOG UA: CORKYTUX_GOG_UA=default -> keep WebKit default (no set_user_agent)")
+            elif ua_gog:
+                s.set_user_agent(ua_gog)
+                _dbg(f"GOG UA: overridden via CORKYTUX_GOG_UA (len={len(ua_gog)})")
+            else:
+                s.set_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
+                _dbg("GOG UA: default Safari override (CORKYTUX_GOG_UA unset)")
+            _dbg(f"GOG UA active: {s.get_user_agent()}")
+        except Exception as e:
+            _dbg(f"GOG UA setup failed: {e}")
 
     col.append(web)
     hint = Gtk.Label(label="Sign in above — the code is captured automatically.")
@@ -1856,7 +1914,7 @@ def cmd_login_window(args):
 
     def grab_current():
         uri = web.get_uri() or ""
-        _dbg(f"Grab button: uri={uri[:120]}")
+        _dbg(f"Grab button: uri={_sani_uri(uri)}")
         if try_extract_code_from_uri(uri):
             return
         hint.set_text("Reading page content…")
@@ -1876,7 +1934,7 @@ def cmd_login_window(args):
         if load_event != WebKit2.LoadEvent.FINISHED:
             return
         uri = web.get_uri() or ""
-        _dbg(f"FINISHED uri={uri[:150]}")
+        _dbg(f"FINISHED uri={_sani_uri(uri)}")
 
         # Heroic pattern: check URL directly
         if try_extract_code_from_uri(uri):
@@ -1910,7 +1968,7 @@ def cmd_login_window(args):
             uri = ""
         from urllib.parse import urlparse
         host = urlparse(uri).hostname or ""
-        _dbg(f"NEW_WINDOW host={host} uri={uri[:120]}")
+        _dbg(f"NEW_WINDOW host={host} uri={_sani_uri(uri)}")
         return False
 
     popup_windows = []  # keep popup Gtk.Window refs alive until login closes
@@ -1918,6 +1976,26 @@ def cmd_login_window(args):
     def on_create(_view, navigation_action):
         # WebKitGTK 6.0 signal: returns the new WebKitWebView (a Gtk.Widget)
         # or NULL; @navigation_action describes what triggered the popup.
+        #
+        # Google SSO is blocked without faking the UA: Google OAuth rejects
+        # non-real-browser agents (disallowed_useragent) and its sign-in page
+        # already crashed the shared web process here (related-view). Returning
+        # None is the documented safe path (WebKit-6.0.gir, create signal:
+        # "or %NULL to propagate the event further") — no popup is created and
+        # the opener keeps running.
+        try:
+            from urllib.parse import urlparse as _uparse
+            popup_uri = navigation_action.get_request().get_uri() or ""
+            phost = (_uparse(popup_uri).hostname or "").lower()
+            if phost in ("accounts.google.com", "accounts.youtube.com", "google.com"):
+                _dbg("Google popup blocked")
+                try:
+                    hint.set_text("Google sign-in is not available here; use email/password or the manual code")
+                except Exception:
+                    pass
+                return None
+        except Exception:
+            pass
         #
         # The child MUST be a related view of the opener (GIR: "must be
         # related"); returning a plain WebView made the plugin process die at
@@ -1973,7 +2051,7 @@ def cmd_login_window(args):
                 if load_event != WebKit2.LoadEvent.FINISHED:
                     return
                 puri = _pv.get_uri() or ""
-                _dbg(f"popup FINISHED uri={puri[:150]}")
+                _dbg(f"popup FINISHED uri={_sani_uri(puri)}")
                 if try_extract_code_from_uri(puri):
                     return
                 try_extract_code_from_page(_pv)
@@ -2038,6 +2116,76 @@ def cmd_login_window(args):
     except Exception as e:
         _dbg(f"web-process-terminated not available: {e}")
 
+    # ─── Instrumentación (WebKit-6.0.gir verificado) ───
+    # console-message NO existe como señal en 6.0 (solo la propiedad
+    # enable-write-console-messages-to-stdout) y resource-load-finished
+    # tampoco: se usa load-failed (28550) + resource-load-started (28793),
+    # monitorizando cada recurso con sus señales propias finished/failed +
+    # get_response()/get_status_code(). URIs siempre vía _sani_uri.
+    WATCH_HOSTS = ("gog.com", "recaptcha.net", "gstatic.com",
+                   "external-accounts.gog.com", "google.com")
+
+    def _watch_host(uri):
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(uri).hostname or "").lower()
+        except Exception:
+            host = ""
+        return any(host == w or host.endswith("." + w) for w in WATCH_HOSTS)
+
+    def _res_uri(res):
+        try:
+            return res.get_uri() or ""
+        except Exception:
+            return ""
+
+    def on_load_failed(_view, load_event, failing_uri, error):
+        # gir: (LoadEvent, gchar*, GError) → gboolean
+        try:
+            _dbg(f"LOAD-FAILED ev={load_event} uri={_sani_uri(failing_uri)} "
+                 f"dom={getattr(error, 'domain', '?')} code={getattr(error, 'code', '?')}")
+        except Exception:
+            pass
+
+    def on_resource_started(_view, resource, request):
+        # gir: (WebKitWebResource, WebKitURIRequest) → void
+        uri = _res_uri(resource)
+        if not _watch_host(uri):
+            return
+        try:
+            _dbg(f"RES-START {_sani_uri(uri)}")
+        except Exception:
+            pass
+        try:
+            resource.connect("finished", _on_res_finished)
+            resource.connect("failed", _on_res_failed)
+        except Exception:
+            pass
+
+    def _on_res_finished(resource):
+        try:
+            resp = resource.get_response()
+            status = resp.get_status_code() if resp else 0
+            _dbg(f"RES-FINISHED status={status} uri={_sani_uri(_res_uri(resource))}")
+        except Exception:
+            pass
+
+    def _on_res_failed(resource, error):
+        try:
+            _dbg(f"RES-FAILED dom={getattr(error, 'domain', '?')} code={getattr(error, 'code', '?')} "
+                 f"uri={_sani_uri(_res_uri(resource))}")
+        except Exception:
+            pass
+
+    try:
+        web.connect("load-failed", on_load_failed)
+    except Exception as e:
+        _dbg(f"load-failed not available: {e}")
+    try:
+        web.connect("resource-load-started", on_resource_started)
+    except Exception as e:
+        _dbg(f"resource-load-started not available: {e}")
+
     # Poll: keeps checking URI + page content every 500s for 30s
     # Covers cases where load-changed misses the redirect
     poll_id = [None]
@@ -2055,7 +2203,7 @@ def cmd_login_window(args):
                 poll_id[0] = None
                 return False
             uri = web.get_uri() or ""
-            _dbg(f"Poll #{attempts[0]}: uri={uri[:100]}")
+            _dbg(f"Poll #{attempts[0]}: uri={_sani_uri(uri)}")
             if try_extract_code_from_uri(uri):
                 poll_id[0] = None
                 return False
@@ -2069,7 +2217,7 @@ def cmd_login_window(args):
             _schedule_poll()
     web.connect("load-changed", _start_poll_after_first_load)
 
-    _dbg(f"Loading URL: {_login_window_url(store)}")
+    _dbg(f"Loading URL: {_sani_uri(_login_window_url(store), 160)}")
     web.load_uri(_login_window_url(store))
     win.present()
     try:
