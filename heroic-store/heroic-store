@@ -835,14 +835,7 @@ def cmd_library(args):
             games = json.loads(proc.stdout)
         except ValueError:
             die(3, "Could not parse legendary output")
-        installed = set()
-        try:
-            proc2 = subprocess.run([LEGENDARY_BIN, "list-installed", "--json"],
-                                   capture_output=True, text=True, timeout=60)
-            if proc2.returncode == 0:
-                installed = {g.get("app_name") for g in json.loads(proc2.stdout or "[]")}
-        except (ValueError, subprocess.TimeoutExpired):
-            pass
+        status = _installed_status()
         # Prune descriptions.json entries whose app_id left the Epic
         # library. Only run when the list arrived complete and without
         # error (we are here only after a successful parse); if the list
@@ -858,7 +851,8 @@ def cmd_library(args):
         emit({"type": "done", "ok": True, "store": "epic", "games": [
             {"app_id": g.get("app_name"), "title": g.get("app_title"),
              "version": g.get("app_version", ""),
-             "installed": g.get("app_name") in installed,
+             "installed": status.get(g.get("app_name"), {}).get("installed", False),
+             "stale_registry": status.get(g.get("app_name"), {}).get("stale", False),
              "cover": _epic_cover(g),
              "description": _epic_desc(g)}
             for g in games if g.get("app_name")
@@ -953,14 +947,7 @@ def cmd_refresh_library(args):
         games = json.loads(proc.stdout)
     except ValueError:
         die(3, "Could not parse legendary output")
-    installed = set()
-    try:
-        proc2 = subprocess.run([LEGENDARY_BIN, "list-installed", "--json"],
-                               capture_output=True, text=True, timeout=60)
-        if proc2.returncode == 0:
-            installed = {g.get("app_name") for g in json.loads(proc2.stdout or "[]")}
-    except (ValueError, subprocess.TimeoutExpired):
-        pass
+    status = _installed_status()
     current_ids = {g.get("app_name") for g in games if g.get("app_name")}
     if current_ids:
         data = _descriptions_load()
@@ -979,7 +966,8 @@ def cmd_refresh_library(args):
     emit({"type": "library", "store": "epic", "games": [
         {"app_id": g.get("app_name"), "title": g.get("app_title"),
          "version": g.get("app_version", ""),
-         "installed": g.get("app_name") in installed,
+         "installed": status.get(g.get("app_name"), {}).get("installed", False),
+         "stale_registry": status.get(g.get("app_name"), {}).get("stale", False),
          "cover": _epic_cover(g),
          "description": _epic_desc(g)}
         for g in rows
@@ -1179,6 +1167,34 @@ def _legendary_list_installed(env_extra=None):
     except (ValueError, subprocess.TimeoutExpired, OSError):
         pass
     return []
+
+
+def _installed_status():
+    """app_name -> {"installed": bool, "stale": bool}.
+
+    installed = legendary registry entry AND the install dir exists AND the
+    game executable exists on disk (executable is usually relative to the
+    install dir). stale = registry entry present but the files are gone:
+    the game is still listed so the launcher offers Install instead of
+    Import, and installed.json is never edited here.
+    """
+    out = {}
+    for g in _legendary_list_installed():
+        app = g.get("app_name")
+        if not app:
+            continue
+        ip = str(g.get("install_path") or "")
+        exe = str(g.get("executable") or "")
+        dir_ok = bool(ip) and Path(ip).is_dir()
+        exe_ok = False
+        if exe:
+            ep = Path(exe)
+            if not ep.is_absolute():
+                ep = Path(ip) / exe
+            exe_ok = ep.is_file()
+        ok = dir_ok and (exe_ok or not exe)
+        out[app] = {"installed": ok, "stale": not ok}
+    return out
 
 
 def _pretty_dir_title(dirname: str) -> str:
