@@ -289,15 +289,20 @@ def cmd_auth(args):
                               capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
             die(4, f"gogdl auth failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
-        _gog_exchange(args.code)
+        if not _gog_exchange(args.code):
+            die(4, "GOG token exchange failed: the code was rejected or expired (codes last ~1 min). Open ONE fresh tab and retry.")
         emit({"type": "done", "ok": True, "store": "gog"})
         return
     webbrowser.open(GOG_LOGIN_URL)
     emit({"type": "auth_url", "store": "gog", "url": GOG_LOGIN_URL,
-          "instructions": "Log in, copy the 'code' param from the final URL, paste it below."})
+          "instructions": "Log in, then copy the 'code' param from the final URL and paste it in the launcher box below."})
 
 
-def _gog_exchange(code: str):
+def _gog_exchange(code: str) -> bool:
+    """Exchange the OAuth authorization code for a refresh token and persist
+    it. Returns False (with a log line) on any failure instead of silently
+    swallowing it, so a 'successful' login can never end up without a saved
+    session."""
     import urllib.request
     import urllib.parse
     try:
@@ -311,15 +316,19 @@ def _gog_exchange(code: str):
                                      headers={"User-Agent": "CorkyTux/3.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             tok = json.loads(resp.read().decode())
-        if tok.get("refresh_token"):
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            GOG_TOKEN_JSON.write_text(json.dumps({"refresh_token": tok["refresh_token"]}))
-            try:
-                os.chmod(GOG_TOKEN_JSON, 0o600)
-            except OSError:
-                pass
-    except Exception:
-        pass
+        if not tok.get("refresh_token"):
+            _dbg(f"_gog_exchange: response sin refresh_token: {str(tok)[:200]}")
+            return False
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        GOG_TOKEN_JSON.write_text(json.dumps({"refresh_token": tok["refresh_token"]}))
+        try:
+            os.chmod(GOG_TOKEN_JSON, 0o600)
+        except OSError:
+            pass
+        return True
+    except Exception as e:
+        _dbg(f"_gog_exchange failed: {e}")
+        return False
 
 
 def _gog_access_token():
@@ -1830,21 +1839,19 @@ def cmd_login_window(args):
         # WebKitGTK 6.0 signal: returns the new WebKitWebView (a Gtk.Widget)
         # or NULL; @navigation_action describes what triggered the popup.
         #
-        # Deliberately NOT a related view, even though the GIR suggests it:
-        # related views share ONE web process with the opener, and the SSO
-        # provider pages (accounts.google.com sign-in — heavy JS/service
-        # workers) have crashed that shared process on every attempt
-        # (web-process-terminated → WebProcessTerminationReason.CRASHED,
-        # leaving the opener with an empty URI and dead JS eval, error 601).
-        # A plain view gets its own web process, so a provider-page crash is
-        # contained to the popup and the login window keeps polling.
-        # window.opener / postMessage still work across processes (same
-        # browsing context group) and cookies/storage stay shared through the
-        # default network session.
+        # The child MUST be a related view of the opener (GIR: "must be
+        # related"); returning a plain WebView made the plugin process die at
+        # popup creation instead (invalid rectangle + immediate exit). Related
+        # views share the web process with the opener, and Google's sign-in
+        # page crashed that shared process (WebProcessTerminationReason.
+        # CRASHED), so GOG no longer uses this window — it logs in through the
+        # system browser + paste-code flow (cmd_auth). This popup path remains
+        # for Epic (inline flow, no popups) and any future store whose SSO
+        # popup survives in the shared process.
         try:
-            pweb = WebKit2.WebView()
+            pweb = WebKit2.WebView(related_view=web)
         except Exception as e:
-            _dbg(f"on_create: popup webview failed: {e}")
+            _dbg(f"on_create: popup webview failed (related-view kwarg): {e}")
             return None
         try:
             ps = pweb.get_settings()
