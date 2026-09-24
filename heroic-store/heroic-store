@@ -319,24 +319,29 @@ def cmd_auth(args):
         if not code:
             die(4, "No valid code found — copy the value of 'code' from the final URL (it expires in ~1 min) and paste just that.")
         _auth_dbg(f"auth gog: code len={len(code)} (raw len={len(raw)})")
-        proc = subprocess.run([GOGDL_BIN, "auth", "--code", code],
-                              capture_output=True, text=True, timeout=120)
-        err = (proc.stderr or proc.stdout or "").strip()
-        _auth_dbg(f"gogdl auth rc={proc.returncode} err_len={len(err)}")
-        if proc.returncode != 0:
-            # "expired"/"invalid" in gogdl's stderr are only hints; fall back
-            # to the generic message with the stderr tail when they don't match.
-            low = err.lower()
-            if "expired" in low or "invalid" in low:
-                die(4, "The code was rejected as invalid or expired (codes last ~1 min): " + err[-160:])
-            die(4, f"gogdl auth failed: {err[-300:]}")
+        # The authorization code is SINGLE-USE, so it is spent exactly once,
+        # here, in the plugin's own exchange. It used to be handed to gogdl
+        # first (`gogdl auth --code`) and then exchanged again here, which
+        # always failed with HTTP 400 (already used) and left the plugin with
+        # no refresh token at all. gogdl cannot be the one to spend it: after
+        # a successful `gogdl auth` this machine has no gogdl credential file
+        # anywhere (~/.config/gogdl, next to the binary, CONFIG_DIR, cwd), so
+        # there is nothing to adopt, while the library, game info and the
+        # session check all read the plugin's own gog_token.json.
         ex = _gog_exchange(code)
         if ex == "network":
             _auth_dbg("exchange: network")
             die(6, "No network connection or GOG is unreachable — check your connection and retry.")
-        if ex != "ok":
-            _auth_dbg("exchange: rejected")
-            die(4, "GOG rejected the code: invalid or expired (codes last ~1 min). Open ONE fresh tab and retry.")
+        if not ex.startswith("ok"):
+            # ex is "rejected" or "rejected: HTTP <status>" — the code was
+            # refused by GOG (invalid / expired / already used), not a net
+            # problem, so it maps to die 4 with the expired-codes hint.
+            _auth_dbg(f"exchange: rejected ({ex})")
+            detail = ex.split(":", 1)[1].strip() if ":" in ex else ""
+            die(4, "GOG rejected the code: it is invalid, expired or was already used "
+                   "(authorization codes are single-use)"
+                   + (f" — {detail}" if detail else "")
+                   + ". Open ONE fresh tab and retry.")
         _auth_dbg("exchange OK, checking real session")
         account = _gog_logged_in()
         if not account:
@@ -355,12 +360,14 @@ def cmd_auth(args):
 def _gog_exchange(code: str) -> str:
     """Exchange the OAuth authorization code for a refresh token and persist
     it. Returns:
-      "ok"       — refresh token saved (persisted session),
-      "network"  — GOG unreachable / connection error,
-      "rejected" — the code was invalid, expired, or the response carried no
-                   refresh_token.
-    Logs only steps, string lengths and return codes — never code or token
-    values."""
+      "ok"                  — refresh token saved (persisted session),
+      "network"             — GOG unreachable / connection error,
+      "rejected[: detail]"  — GOG refused the code (invalid, expired or
+                              already used) or the response carried no
+                              refresh_token; "detail" carries the HTTP status
+                              when there was one.
+    Logs only steps, string lengths, return codes and HTTP status — never code
+    or token values."""
     import urllib.request
     import urllib.parse
     import urllib.error
@@ -388,8 +395,15 @@ def _gog_exchange(code: str) -> str:
         _auth_dbg("exchange: refresh_token persisted (len="
                   + str(len(tok["refresh_token"])) + ")")
         return "ok"
+    except urllib.error.HTTPError as e:
+        # HTTPError IS a subclass of URLError, so it MUST be caught first: a
+        # 4xx from the token endpoint (code invalid/expired/already used) was
+        # being reported as a network failure. Only the status is logged, not
+        # the response body.
+        _auth_dbg(f"exchange: rejected http_status={e.code}")
+        return f"rejected: HTTP {e.code}"
     except urllib.error.URLError as e:
-        _auth_dbg(f"exchange: network error: {e}")
+        _auth_dbg(f"exchange: network error: {e.reason}")
         return "network"
     except TimeoutError:
         _auth_dbg("exchange: network timeout")
