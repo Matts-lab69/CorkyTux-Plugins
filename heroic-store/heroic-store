@@ -19,6 +19,12 @@ import webbrowser
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "CorkyTux" / "plugins" / "heroic-store"
+# Shared Steam API minimum gap, enforced across plugin processes via a
+# timestamp file (the launcher can run a library refresh and modal
+# game-info calls at the same time; a per-process sleep would let the two
+# overlap).
+STEAM_MIN_INTERVAL = 1.5
+STEAM_THROTTLE_FILE = CONFIG_DIR / ".steam_throttle"
 HEROIC_DIR = Path.home() / ".config" / "heroic"
 # Independent from Heroic: own legendary session (~/.config/legendary)
 # and own binaries (PATH or CONFIG_DIR/bin via `setup`). Nothing is
@@ -511,9 +517,25 @@ _steam_edition_terms = ("soundtrack", "demo", "dlc", "pack")
 
 def _steam_throttle():
     # Steam public APIs have no SLA token; keep a >=1.5 s gap between
-    # consecutive requests and back off when we still get 429s.
+    # consecutive requests and back off when we still get 429s. The gap is
+    # measured from the last real request (timestamp file), so concurrent
+    # plugin invocations share it instead of stacking sleeps.
     import time as _t
-    _t.sleep(1.5)
+    while True:
+        last = 0.0
+        try:
+            last = float(STEAM_THROTTLE_FILE.read_text().strip() or 0)
+        except (OSError, ValueError):
+            pass
+        wait = last + STEAM_MIN_INTERVAL - _t.time()
+        if wait <= 0:
+            break
+        _t.sleep(wait)
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        STEAM_THROTTLE_FILE.write_text(str(_t.time()))
+    except OSError:
+        pass
 
 
 def _http_json(url: str, timeout: float = 15, attempts: int = 2, err=None):
@@ -659,8 +681,11 @@ def _desc_cascade(app_id: str, title: str, lang: str, match, force: bool = False
             return (disp.get("description") or "", disp.get("source") or "fallback",
                     disp.get("source_url") or "")
     else:
-        # Genuine miss (no text in any source): persist only the marker.
-        _descriptions_save(app_id, {"no_description_checked_at": now})
+        # Genuine miss (no text in any source): persist only the marker,
+        # and only when there is no positive entry to preserve — a refresh
+        # never erases previously saved text for a miss or a failure.
+        if not disp.get("description"):
+            _descriptions_save(app_id, {"no_description_checked_at": now})
     return desc, source, source_url
 
 
@@ -872,6 +897,111 @@ def cmd_library(args):
     except Exception as e:
         die(3, f"GOG library failed: {e}")
     emit({"type": "done", "ok": True, "store": "gog", "games": games})
+
+
+def _describe_game(app_id: str, title: str, lang: str, g, match) -> bool:
+    # Library-refresh equivalent of game-info's refresh path for one game:
+    # a previously saved positive is replaced only when a new valid result
+    # arrives (network failures and genuine misses both keep the old text).
+    import time as _t
+    desc = _epic_desc(g) or ""
+    if not desc and match is not None:
+        desc = str(match.get("description") or "")
+    src, url = "store", ""
+    from_cascade = False
+    if not desc or desc.strip().casefold() == title.strip().casefold():
+        if desc and desc.strip().casefold() == title.strip().casefold():
+            desc = ""
+        desc, src, url = _desc_cascade(app_id, title, lang, match, force=True)
+        from_cascade = True
+    if desc:
+        if not from_cascade:
+            _descriptions_save(app_id, {
+                "description": desc, "source": src, "source_url": url,
+                "lang": lang, "saved_at": _t.time(),
+            })
+        return True
+    return False
+
+
+def cmd_refresh_library(args):
+    # Batch "invalidate and re-resolve": mirrors library() for the grid,
+    # then re-runs the per-game description resolution for every game in
+    # the displayed library off the GTK main loop. A valid result replaces
+    # the saved entry (updating description_lang); failures and genuine
+    # misses keep the previous text. The caller (launcher) kills this
+    # process to cancel; --ppid makes it self-exit if the launcher closes.
+    store = args.store
+    if store != "epic":
+        die(2, "refresh-library only supports the Epic store")
+    _require_binary(LEGENDARY_BIN, "legendary")
+    ppid = int(getattr(args, "ppid", 0) or 0)
+    lang = args.lang or "spanish"
+    cmd = [LEGENDARY_BIN, "list", "--json"]
+    if args.refresh:
+        cmd.append("--force-refresh")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        die(3, "legendary list timed out")
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout).strip()[-300:]
+        if "ogged in" in err or "login" in err.lower():
+            die(4, "Epic not logged in. Log in from the Stores tab first.")
+        die(3, f"legendary list failed: {err}")
+    try:
+        games = json.loads(proc.stdout)
+    except ValueError:
+        die(3, "Could not parse legendary output")
+    installed = set()
+    try:
+        proc2 = subprocess.run([LEGENDARY_BIN, "list-installed", "--json"],
+                               capture_output=True, text=True, timeout=60)
+        if proc2.returncode == 0:
+            installed = {g.get("app_name") for g in json.loads(proc2.stdout or "[]")}
+    except (ValueError, subprocess.TimeoutExpired):
+        pass
+    current_ids = {g.get("app_name") for g in games if g.get("app_name")}
+    if current_ids:
+        data = _descriptions_load()
+        stale = set(data) - current_ids
+        if stale:
+            for k in stale:
+                del data[k]
+            _write_json_atomic(DESCRIPTIONS_FILE, data)
+    try:
+        catalog = _epic_catalog()
+    except Exception:
+        catalog = []
+    cat = {str((e or {}).get("title") or "").casefold(): e for e in catalog}
+    rows = [g for g in games if g.get("app_name")]
+    total = len(rows)
+    emit({"type": "library", "store": "epic", "games": [
+        {"app_id": g.get("app_name"), "title": g.get("app_title"),
+         "version": g.get("app_version", ""),
+         "installed": g.get("app_name") in installed,
+         "cover": _epic_cover(g),
+         "description": _epic_desc(g)}
+        for g in rows
+    ]})
+    done = 0
+    updated = 0
+    for g in rows:
+        app_id = g.get("app_name") or ""
+        title = str(g.get("app_title") or "")
+        if ppid:
+            try:
+                if os.getppid() != ppid:
+                    return
+            except Exception:
+                return
+        match = cat.get(str(title).casefold())
+        if _describe_game(app_id, title, lang, g, match):
+            updated += 1
+        done += 1
+        emit({"type": "progress", "done": done, "total": total, "stage": title, "store": "epic"})
+    emit({"type": "done", "ok": True, "store": "epic", "updated": updated, "total": total,
+          "rescued": 0, "markers": 0})
 
 
 _PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
@@ -1918,6 +2048,11 @@ def main():
     p_lib = sub.add_parser("library")
     p_lib.add_argument("--store", choices=["epic", "gog"], required=True)
     p_lib.add_argument("--refresh", action="store_true")
+    p_rl = sub.add_parser("refresh-library")
+    p_rl.add_argument("--store", choices=["epic", "gog"], required=True)
+    p_rl.add_argument("--lang", default="spanish")
+    p_rl.add_argument("--ppid", type=int, default=0)
+    p_rl.add_argument("--refresh", action="store_true")
     sub.add_parser("free-promos")
     p_gss = sub.add_parser("gog-store-search")
     p_gss.add_argument("--query", default="")
@@ -1954,6 +2089,7 @@ def main():
         "auth": cmd_auth,
         "logout": cmd_logout,
         "library": cmd_library,
+        "refresh-library": cmd_refresh_library,
         "free-promos": cmd_free_promos,
         "epic-deals": cmd_epic_deals,
         "gog-store-search": cmd_gog_store_search,
