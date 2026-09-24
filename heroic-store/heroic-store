@@ -2034,14 +2034,24 @@ def cmd_login_window(args):
         _dbg(f"create signal not available: {e}")
     web.connect("decide-policy", on_decide)
     web.connect("load-changed", on_load_changed)
-    # Safety net: if the shared web process still dies mid-handshake (related
-    # popup + provider SSO), reload the opener so the login window stays alive
-    # instead of showing a dead blank page. Capped at 2 reloads.
+    # Safety net: if the shared web process dies mid-handshake, reload the
+    # opener so the login window stays alive instead of showing a dead page.
+    # The reload cap is GOG-only: Epic keeps its previous uncapped reload, so
+    # a transient crash there is recovered as it was before the cap existed.
     _terminations = [0]
     def on_web_process_terminated(_w, reason):
-        # Bounded: a page that keeps killing the shared process must not put
-        # the window in a reload loop. Two attempts, then stop and tell the
-        # user.
+        host = _host_of(web.get_uri() or "")
+        if store != "gog":
+            _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) host={host} "
+                 f"- reloading opener (epic, uncapped)")
+            try:
+                web.reload()
+            except Exception as e:
+                _dbg(f"reload after termination failed: {e}")
+            return
+        # Bounded for GOG: a page that keeps killing the shared process must
+        # not put the window in a reload loop. Two attempts, then stop and
+        # tell the user.
         _terminations[0] += 1
         n = _terminations[0]
         if n > 2:
@@ -2053,7 +2063,6 @@ def cmd_login_window(args):
             except Exception:
                 pass
             return
-        host = _host_of(web.get_uri() or "")
         _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) host={host} "
              f"- reloading opener ({n}/2)")
         try:
