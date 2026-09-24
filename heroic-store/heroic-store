@@ -1701,13 +1701,39 @@ def cmd_login_window(args):
     col.set_margin_bottom(6)
     col.set_margin_start(6)
     col.set_margin_end(6)
+    # ── Sesión de red persistente + reCAPTCHA-friendly (WebKitGTK 6.0) ─────
+    # GOG's login page embeds Google reCAPTCHA (recaptcha.net) in a
+    # cross-origin iframe and its SSO providers live under
+    # external-accounts.gog.com. WebKitGTK blocks third-party cookies by
+    # default (ITP) and keeps the session in memory, which hangs the captcha
+    # and the provider handshake. 6.0 removed the custom-WebContext
+    # constructors (verified against WebKit-6.0.gir), so tune the default
+    # network session instead: persistent credential storage, ITP off, and
+    # cookies always accepted. The default session persists site data to
+    # disk (non-ephemeral), so cookies survive between attempts.
     web = WebKit2.WebView()
     web.set_vexpand(True)
     web.set_hexpand(True)
 
-    # The Epic login URL carries &display=popup, which makes Epic perform the
-    # provider SSO as an INLINE navigation in this same view instead of a JS
-    # window.open popup (verified on the live page). No popup handling needed.
+    def _relax_storage(ns):
+        """Allow persistent credentials + third-party cookies so reCAPTCHA and
+        the SSO popup pages work inside the embedded view. Each call is
+        guarded: WebKitGTK 6.0 moved these knobs onto WebKitNetworkSession."""
+        for name, arg in (("set_persistent_credential_storage_enabled", True),
+                          ("set_itp_enabled", False)):
+            try:
+                getattr(ns, name)(arg)
+            except Exception as e:
+                _dbg(f"  _relax_storage {name}: {e}")
+        try:
+            ns.get_cookie_manager().set_accept_policy(WebKit2.CookieAcceptPolicy.ALWAYS)
+        except Exception as e:
+            _dbg(f"  cookie accept policy: {e}")
+
+    try:
+        _relax_storage(web.get_network_session())
+    except Exception as e:
+        _dbg(f"storage relaxation failed: {e}")
     try:
         settings = web.get_settings()
         settings.set_property("enable-javascript", True)
@@ -1715,9 +1741,9 @@ def cmd_login_window(args):
     except Exception:
         pass
     try:
-        ctx = web.get_network_session() if hasattr(web, "get_network_session") else WebKit2.WebContext.get_default()
-        if ctx is not None and hasattr(ctx, "set_persistent_credential_storage_enabled"):
-            ctx.set_persistent_credential_storage_enabled(True)
+        # Auto-allow permission requests (media, geolocation, ...) so
+        # recaptcha.net / external-accounts.gog.com never block on a prompt.
+        web.connect("permission-request", lambda _w, req: (req.allow(), True)[1])
     except Exception:
         pass
     if store == "epic":
@@ -1771,16 +1797,22 @@ def cmd_login_window(args):
         _dbg("  Trying page content extraction...")
         try_extract_code_from_page()
 
-    # ─── SSO providers: no popup machinery needed ───
+    # ─── SSO provider popups ───
     # Epic's cookie login page opens provider SSO (Google/Steam/...) via
-    # window.open when it runs windowed. We avoid that entirely: the login URL
-    # now carries &display=popup, which makes Epic navigate the provider
-    # "forward" page INLINE in the same WebView (verified on the live page).
-    # (This WebKitGTK build aborts on the "create" signal, so real popups are
-    # deliberately not attempted — display=popup sidesteps them.)
+    # window.open when run windowed, but our Epic URL uses &display=popup so
+    # the provider "forward" page loads INLINE in this same WebView (verified
+    # on the live page) — no popup needed there. GOG has NO equivalent: its
+    # social buttons (Google/Steam/Discord/Xbox) call window.open() to
+    # external-accounts.gog.com and the SSO completes in that popup, with the
+    # result handed back to the opener. So for GOG (and any store that opens
+    # real popups), implement the native WebKit pattern: leave NEW_WINDOW
+    # unhandled in decide-policy (default behavior) and connect "create" to
+    # provide a real Gtk window hosting the child WebView — instead of
+    # returning False and letting WebKitGTK silently drop the new window.
     def on_decide(_view, decision, decision_type):
-        # Log any new-window request for diagnosis; never repurpose it. NAV/RESP
-        # are let through untouched (unhandled = accepted, as the page relies on).
+        # NEW_WINDOW: unhandled → WebKitGTK emits "create" below, which hosts
+        # the popup. NAV/RESP are let through untouched (unhandled = accepted,
+        # as the page relies on).
         if decision_type != WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION:
             return False
         try:
@@ -1792,6 +1824,54 @@ def cmd_login_window(args):
         _dbg(f"NEW_WINDOW host={host} uri={uri[:120]}")
         return False
 
+    popup_windows = []  # keep popup Gtk.Window refs alive until login closes
+
+    def on_create(_view, navigation_action):
+        # WebKitGTK 6.0 signal: returns the new WebKitWebView (a Gtk.Widget)
+        # or NULL; @navigation_action describes what triggered the popup.
+        # The child MUST be a related view of the opener: that is what shares
+        # the same web process + cookies + window.opener, which GOG's SSO
+        # flow uses to hand the auth result back to login.gog.com.
+        try:
+            pweb = WebKit2.WebView()
+            pweb.set_property("related-view", web)
+        except Exception as e:
+            _dbg(f"on_create: popup webview failed: {e}")
+            return None
+        try:
+            ps = pweb.get_settings()
+            ps.set_property("enable-javascript", True)
+        except Exception:
+            pass
+        try:
+            pwin = Gtk.Window(title="Login popup")
+            pwin.set_default_size(680, 720)
+            pbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            pwin.set_child(pbox)
+            pbox.append(pweb)
+            pweb.set_vexpand(True)
+            pweb.set_hexpand(True)
+            # window.close() from the popup closes the popup window (not quit)
+            try:
+                pweb.connect("close", lambda _w, w=pwin: (w.close(), False)[1])
+            except Exception:
+                pass
+            # Docs: don't show until ready-to-show (paint-ready).
+            try:
+                pweb.connect("ready-to-show", lambda _w: pwin.present())
+            except Exception:
+                pwin.present()
+            popup_windows.append(pwin)
+            _dbg("Popup window created for SSO provider")
+            return pweb
+        except Exception as e:
+            _dbg(f"on_create: popup window failed: {e}")
+            return None
+
+    try:
+        web.connect("create", on_create)
+    except Exception as e:
+        _dbg(f"create signal not available: {e}")
     web.connect("decide-policy", on_decide)
     web.connect("load-changed", on_load_changed)
 
