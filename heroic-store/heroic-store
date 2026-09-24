@@ -35,6 +35,11 @@ EAC_RUNTIME = HEROIC_TOOLS / "eac_runtime"
 BE_RUNTIME = HEROIC_TOOLS / "battleye_runtime"
 INSTALLS_JSON = CONFIG_DIR / "installs.json"
 GOG_TOKEN_JSON = CONFIG_DIR / "gog_token.json"
+# Legendary's own session data and installed-games registry (independent
+# from Heroic's). cleanup-stale reads and backs it up but never writes it
+# directly: `legendary uninstall` is the only writer besides legendary.
+LEGENDARY_DIR = Path.home() / ".config" / "legendary"
+LEGENDARY_INSTALLED = LEGENDARY_DIR / "installed.json"
 
 EPIC_CLIENT_ID = "34a02cf8f4414e29b15921876da36f9a"
 GOG_CLIENT_ID = "46899977096215655"
@@ -1140,6 +1145,104 @@ def _gog_probe(dest: Path, app_id: str):
     return str(dest), "", "Linux"
 
 
+def _stale_cleanup_decision(install_path: str):
+    """Guards shared by cleanup-stale (real run and --dry-run).
+
+    Returns (allowed, reason). Reasons: "no_path" (registry entry without
+    install_path), "folder_present" (the install folder exists again —
+    never touch live files), "disk_unmounted" (parent folder missing while
+    the path is under a mount prefix or outside the default base).
+    allowed=True means the record is safe to drop: the folder is gone and
+    either its parent exists or the path lives under the plugin's default
+    base (~/Games/Heroic), which is never a mount point.
+    """
+    if not install_path:
+        return False, "no_path"
+    ipath = Path(install_path)
+    if ipath.is_dir():
+        return False, "folder_present"
+    if not ipath.parent.is_dir():
+        under_mount = any(
+            ipath.is_relative_to(Path(p))
+            for p in ("/mnt", "/media", "/run/media")
+        )
+        if under_mount or not ipath.is_relative_to(Path.home() / "Games" / "Heroic"):
+            return False, "disk_unmounted"
+    return True, None
+
+
+def cmd_cleanup_stale(args):
+    """Drop a stale Epic registry entry (record whose install folder is
+    gone) so the next `install` respects the user's --base-path instead of
+    legendary silently reusing the old install_path from the registry.
+
+    Safe by construction: guards refuse to touch live folders or paths
+    whose parent is missing under a mount prefix; the uninstall runs with
+    --keep-files/--skip-uninstaller (pure registry drop, never deletes
+    files); installed.json is backed up first (last 5 kept in CONFIG_DIR);
+    success is verified by re-reading installed.json because legendary
+    exits 0 even when its lock is held. --dry-run applies the guards and
+    reports what would happen without touching anything.
+    """
+    if args.store != "epic":
+        die(2, "cleanup-stale only supports the epic store")
+    regs = _read_json(LEGENDARY_INSTALLED)
+    if not isinstance(regs, dict):
+        die(4, f"Could not read {LEGENDARY_INSTALLED}: expected the installed-games "
+               f"object (is the legendary session ready?).")
+    entry = regs.get(args.app_id)
+    if not entry:
+        emit({"type": "done", "ok": True, "store": "epic", "app_id": args.app_id,
+              "cleaned": False, "reason": "no_record"})
+        return
+    ip = str(entry.get("install_path") or "")
+    allowed, reason = _stale_cleanup_decision(ip)
+    if args.dry_run:
+        emit({"type": "done", "ok": True, "store": "epic", "app_id": args.app_id,
+              "cleaned": False, "would_clean": allowed, "reason": reason,
+              "install_path": ip})
+        return
+    if not allowed:
+        if reason == "folder_present":
+            die(7, f"The install folder already exists ({ip}); the record was NOT "
+                   f"cleaned. Import the game instead.")
+        if reason == "disk_unmounted":
+            die(6, f"Install directory is not accessible ({Path(ip).parent} does not "
+                   f"exist; disk probably unmounted). The record was NOT cleaned.")
+        die(6, f"The registry entry of {args.app_id} has no install_path; "
+               f"nothing to clean.")
+    _require_binary(LEGENDARY_BIN, "legendary")
+    # Backup installed.json (only the 5 most recent survive).
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    import time as _t
+    ts = _t.strftime("%Y%m%d-%H%M%S")
+    shutil.copy2(LEGENDARY_INSTALLED, CONFIG_DIR / f"installed.json.bak-{ts}")
+    for bak in sorted(CONFIG_DIR.glob("installed.json.bak-*"))[:-5]:
+        try:
+            bak.unlink()
+        except OSError:
+            pass
+    try:
+        subprocess.run([LEGENDARY_BIN, "uninstall", "--keep-files",
+                        "--skip-uninstaller", "-y", args.app_id],
+                       capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        die(5, f"legendary uninstall timed out (120s) for {args.app_id}; "
+               f"the record was NOT cleaned. Retry once no other Epic "
+               f"operation is running.")
+    # legendary exits 0 even when it could not take the installed.json lock
+    # (cli.py returns without error); verify by re-reading the registry.
+    regs2 = _read_json(LEGENDARY_INSTALLED)
+    if isinstance(regs2, dict) and args.app_id in regs2:
+        die(5, "The record was not cleaned: another Epic process holds the "
+               "installed.json lock. Retry when it finishes.")
+    regs = _read_installs()
+    regs.pop(f"epic:{args.app_id}", None)
+    _write_installs(regs)
+    emit({"type": "done", "ok": True, "store": "epic", "app_id": args.app_id,
+          "cleaned": True})
+
+
 def cmd_uninstall(args):
     if args.store == "epic":
         _require_binary(LEGENDARY_BIN, "legendary")
@@ -2151,6 +2254,12 @@ def main():
     p_un = sub.add_parser("uninstall")
     p_un.add_argument("--store", choices=["epic", "gog"], required=True)
     p_un.add_argument("--app-id", required=True)
+    p_cs = sub.add_parser("cleanup-stale")
+    p_cs.add_argument("--store", choices=["epic"], required=True)
+    p_cs.add_argument("--app-id", required=True)
+    p_cs.add_argument("--dry-run", action="store_true",
+                      help="apply the guards and report what would be cleaned, "
+                           "without backup, uninstall or touching the mirror")
     p_li = sub.add_parser("launch-info")
     p_li.add_argument("--store", choices=["epic", "gog"], required=True)
     p_li.add_argument("--app-id", required=True)
@@ -2183,6 +2292,7 @@ def main():
         "gog-store-search": cmd_gog_store_search,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
+        "cleanup-stale": cmd_cleanup_stale,
         "launch-info": cmd_launch_info,
         "game-info": cmd_game_info,
         "login-window": cmd_login_window,

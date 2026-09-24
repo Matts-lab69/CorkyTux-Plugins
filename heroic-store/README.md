@@ -98,7 +98,20 @@ Terminal fallback (if the embedded window fails):
    (EAC/EOS compatible). Fall Guys verified working.
 3. Check launch data: `./heroic-store launch-info --store epic --app-id ID`
 4. Uninstall: `./heroic-store uninstall --store epic --app-id ID`
-5. Import what's already installed (Heroic or another path):
+5. **Stale Epic records**: if an Epic game's install folder was deleted
+   outside the launcher, legendary keeps a registry entry
+   (`~/.config/legendary/installed.json`) and a fresh `install` would
+   silently reuse the OLD path. The launcher asks first, then drops the
+   record with:
+   `./heroic-store cleanup-stale --store epic --app-id ID`
+   (`--dry-run` checks what would happen without touching anything).
+   Cleanup is safe: `legendary uninstall --keep-files --skip-uninstaller`
+   only removes the registry entry (never deletes files), after backing up
+   `installed.json` into the plugin's `CONFIG_DIR` (last 5 kept). Records
+   under `/mnt`, `/media` or `/run/media` are left alone while the parent
+   folder is missing (disk likely unmounted), and cleanup refuses to run
+   while another Epic operation holds legendary's lock.
+6. Import what's already installed (Heroic or another path):
    `./heroic-store heroic-scan` (own session + Heroic, `~/Games/Heroic` only)
 
 ## EOS / EAC / umu
