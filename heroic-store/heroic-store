@@ -853,6 +853,8 @@ def cmd_library(args):
              "version": g.get("app_version", ""),
              "installed": status.get(g.get("app_name"), {}).get("installed", False),
              "stale_registry": status.get(g.get("app_name"), {}).get("stale", False),
+             "install_path": status.get(g.get("app_name"), {}).get("install_path", "") if status.get(g.get("app_name"), {}).get("installed", False) else "",
+             "executable": status.get(g.get("app_name"), {}).get("executable", "") if status.get(g.get("app_name"), {}).get("installed", False) else "",
              "cover": _epic_cover(g),
              "description": _epic_desc(g)}
             for g in games if g.get("app_name")
@@ -968,6 +970,8 @@ def cmd_refresh_library(args):
          "version": g.get("app_version", ""),
          "installed": status.get(g.get("app_name"), {}).get("installed", False),
          "stale_registry": status.get(g.get("app_name"), {}).get("stale", False),
+         "install_path": status.get(g.get("app_name"), {}).get("install_path", "") if status.get(g.get("app_name"), {}).get("installed", False) else "",
+         "executable": status.get(g.get("app_name"), {}).get("executable", "") if status.get(g.get("app_name"), {}).get("installed", False) else "",
          "cover": _epic_cover(g),
          "description": _epic_desc(g)}
         for g in rows
@@ -1170,13 +1174,17 @@ def _legendary_list_installed(env_extra=None):
 
 
 def _installed_status():
-    """app_name -> {"installed": bool, "stale": bool}.
+    """app_name -> {"installed": bool, "stale": bool, "install_path": str,
+    "executable": str}.
 
     installed = legendary registry entry AND the install dir exists AND the
     game executable exists on disk (executable is usually relative to the
     install dir). stale = registry entry present but the files are gone:
     the game is still listed so the launcher offers Install instead of
-    Import, and installed.json is never edited here.
+    Import, and installed.json is never edited here. install_path and
+    executable are echoed from the registry so a verified game can be
+    imported with its real folder/exe (a broken import must not fall back
+    to a guessed default dir).
     """
     out = {}
     for g in _legendary_list_installed():
@@ -1193,7 +1201,8 @@ def _installed_status():
                 ep = Path(ip) / exe
             exe_ok = ep.is_file()
         ok = dir_ok and (exe_ok or not exe)
-        out[app] = {"installed": ok, "stale": not ok}
+        out[app] = {"installed": ok, "stale": not ok,
+                    "install_path": ip, "executable": exe}
     return out
 
 
