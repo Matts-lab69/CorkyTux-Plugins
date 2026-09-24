@@ -1832,11 +1832,14 @@ def cmd_login_window(args):
         # The child MUST be a related view of the opener: that is what shares
         # the same web process + cookies + window.opener, which GOG's SSO
         # flow uses to hand the auth result back to login.gog.com.
+        # WebKitGTK 6.0 marks related-view as construct-only ("The related
+        # WebKitWebView ... is only valid during the object construction"),
+        # so it cannot be set_property() afterwards — pass it as a constructor
+        # kwarg (PyGObject routes kwargs through g_object_newv).
         try:
-            pweb = WebKit2.WebView()
-            pweb.set_property("related-view", web)
+            pweb = WebKit2.WebView(related_view=web)
         except Exception as e:
-            _dbg(f"on_create: popup webview failed: {e}")
+            _dbg(f"on_create: popup webview failed (related-view kwarg): {e}")
             return None
         try:
             ps = pweb.get_settings()
