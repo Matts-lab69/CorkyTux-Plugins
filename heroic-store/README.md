@@ -12,6 +12,26 @@ The `heroic-store` plugin brings Epic Games + GOG into CorkyTux using its
    (`heroic-store` + `plugin.json`, executable bit set).
 2. Restart the launcher (`pkill -x corkytux`) and open the **Store** page.
 
+## Canonical source & syncing (development)
+
+The **repository copy** of `heroic-store` is the single source of truth.
+Do not edit the installed copies by hand — edit here and run:
+
+```bash
+./install.sh
+```
+
+`install.sh` copies `heroic-store`, `plugin.json` and `README.md` to both
+runtime locations and prints an `md5sum` so the three copies must match:
+
+- `~/.local/share/CorkyTux/plugins/heroic-store/` — the executable the
+  launcher spawns.
+- `~/.config/CorkyTux/plugins/heroic-store/` — the plugin's `CONFIG_DIR`
+  (runtime state: `descriptions.json`, `installs.json`, `gog_token.json`,
+  `bin/legendary`, `bin/gogdl`, `.status_cache.json`, `.steam_throttle`).
+  Only the script and its metadata are overwritten; state is never touched.
+
+
 ## First step: `setup` (required once)
 
 The plugin downloads its own `legendary` / `gogdl` to:
