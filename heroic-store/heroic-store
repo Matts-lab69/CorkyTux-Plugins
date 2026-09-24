@@ -1829,17 +1829,22 @@ def cmd_login_window(args):
     def on_create(_view, navigation_action):
         # WebKitGTK 6.0 signal: returns the new WebKitWebView (a Gtk.Widget)
         # or NULL; @navigation_action describes what triggered the popup.
-        # The child MUST be a related view of the opener: that is what shares
-        # the same web process + cookies + window.opener, which GOG's SSO
-        # flow uses to hand the auth result back to login.gog.com.
-        # WebKitGTK 6.0 marks related-view as construct-only ("The related
-        # WebKitWebView ... is only valid during the object construction"),
-        # so it cannot be set_property() afterwards — pass it as a constructor
-        # kwarg (PyGObject routes kwargs through g_object_newv).
+        #
+        # Deliberately NOT a related view, even though the GIR suggests it:
+        # related views share ONE web process with the opener, and the SSO
+        # provider pages (accounts.google.com sign-in — heavy JS/service
+        # workers) have crashed that shared process on every attempt
+        # (web-process-terminated → WebProcessTerminationReason.CRASHED,
+        # leaving the opener with an empty URI and dead JS eval, error 601).
+        # A plain view gets its own web process, so a provider-page crash is
+        # contained to the popup and the login window keeps polling.
+        # window.opener / postMessage still work across processes (same
+        # browsing context group) and cookies/storage stay shared through the
+        # default network session.
         try:
-            pweb = WebKit2.WebView(related_view=web)
+            pweb = WebKit2.WebView()
         except Exception as e:
-            _dbg(f"on_create: popup webview failed (related-view kwarg): {e}")
+            _dbg(f"on_create: popup webview failed: {e}")
             return None
         try:
             ps = pweb.get_settings()
@@ -1898,6 +1903,20 @@ def cmd_login_window(args):
             try:
                 pweb.connect("permission-request",
                              lambda _w, req: (req.allow(), True)[1])
+            except Exception:
+                pass
+            # If the provider page crashes its own (popup) web process, the
+            # opener survives — just close the dead popup and tell the user
+            # to retry.
+            def _on_popup_terminated(_pv, reason):
+                _dbg(f"popup WEB PROCESS TERMINATED (reason={reason!r})")
+                try:
+                    pwin.set_visible(False)
+                    hint.set_text("SSO popup crashed — try the login again.")
+                except Exception:
+                    pass
+            try:
+                pweb.connect("web-process-terminated", _on_popup_terminated)
             except Exception:
                 pass
             # Docs: don't show until ready-to-show (paint-ready).
