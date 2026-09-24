@@ -2103,22 +2103,48 @@ try {
     # popup + provider SSO), reload the opener so the login window stays alive
     # instead of showing a dead blank page. Capped at 2 reloads.
     _terminations = [0]
+    # Hosts of the social providers whose pages kill the shared web process
+    # (Google's reCAPTCHA is the observed crasher, both in a popup and in the
+    # same view). Hostname only.
+    _PROVIDER_HOSTS = ("accounts.google.com", "accounts.youtube.com",
+                        "steamcommunity.com", "login.live.com",
+                        "discord.com", "external-accounts.gog.com")
     def on_web_process_terminated(_w, reason):
-        # Bounded: a provider page that keeps killing the shared process must
-        # not put the window in a reload loop. Two reloads to recover, then
-        # stop and tell the user.
+        # Bounded: a page that keeps killing the shared process must not put
+        # the window in a recovery loop. Two attempts, then stop and tell the
+        # user.
         _terminations[0] += 1
         n = _terminations[0]
         if n > 2:
             _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) - reload limit "
-                 f"reached (2 reloads), not reloading again")
+                 f"reached (2 attempts), not recovering again")
             try:
                 hint.set_text("The login page keeps crashing. Use email/password, "
                               "or the manual code in the launcher.")
             except Exception:
                 pass
             return
-        _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) - reloading opener ({n}/2)")
+        host = _host_of(web.get_uri() or "")
+        if store == "gog" and host in _PROVIDER_HOSTS:
+            # Reloading the opener here just re-requests the provider page
+            # that is crashing, and the user lands back on the GOG login form
+            # with the provider state lost. Go to GOG's own form instead and
+            # say what happened. Counts as one of the two attempts.
+            _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) host={host} - "
+                 f"provider crash, loading GOG login again ({n}/2)")
+            try:
+                hint.set_text("Google/social login crashed in this window; "
+                              "use email/password or the browser method "
+                              "(Log in, then paste the code)")
+            except Exception:
+                pass
+            try:
+                web.load_uri(GOG_LOGIN_URL)
+            except Exception as e:
+                _dbg(f"recovery load of GOG login failed: {e}")
+            return
+        _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) host={host} "
+             f"- reloading opener ({n}/2)")
         try:
             web.reload()
         except Exception as e:
