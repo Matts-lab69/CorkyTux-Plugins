@@ -1698,7 +1698,13 @@ def _login_window_url(store: str) -> str:
                 + quote("http://localhost/launcher/authorized", safe="")
                 + "&responseType=code"
                 + "&display=popup")  # inline forward (same view), never window.open
-    return GOG_LOGIN_URL
+    # CORKYTUX_GOG_LAYOUT probes whether GOG has a layout that renders the
+    # social login inline the way Epic's &display=popup does. Unset (or empty)
+    # keeps layout=client2. GOG only: this function is not used for epic.
+    layout = os.environ.get("CORKYTUX_GOG_LAYOUT", "").strip()
+    if not layout:
+        return GOG_LOGIN_URL
+    return GOG_LOGIN_URL.replace("layout=client2", "layout=" + layout)
 
 
 def _query_param(url: str, key: str) -> str:
@@ -1890,6 +1896,54 @@ def cmd_login_window(args):
     web.set_vexpand(True)
     web.set_hexpand(True)
 
+    # --- Experimental social login in this same view (GOG only) ---
+    # Epic needs none of this: its URL carries &display=popup, which makes
+    # Epic render the provider "forward" INLINE in the same view, so it never
+    # asks for a second window. GOG has no such parameter, so its social
+    # buttons use window.open / target=_blank. Two env toggles (GOG only,
+    # unset = current behaviour) let us probe that without a rebuild:
+    #   CORKYTUX_GOG_SAMEWIN=1 -> inject the same-window shim below
+    #   CORKYTUX_GOG_LAYOUT=<v> -> replace layout=client2 in the login URL
+    # The popup blocks (decide-policy + create) stay as the safety net either
+    # way, and the on_login_success capture is untouched.
+    samewin = store == "gog" and os.environ.get("CORKYTUX_GOG_SAMEWIN") == "1"
+    _dbg(f"toggles: samewin={'on' if samewin else 'off'} "
+         f"layout={os.environ.get('CORKYTUX_GOG_LAYOUT') or 'default'}")
+    if samewin:
+        # UserContentManager of the view: user-content-manager is
+        # construct-only in WebKit-6.0.gir, so the default manager is taken
+        # from the getter and the script is added to it (add_script, gir
+        # 20177). UserScript.new (gir 20987, "Creates a new user script")
+        # injects into the PAGE's own world -- that is what makes it able to
+        # replace the page's window.open. new_for_world (gir 21054, "for
+        # script world with name @world_name") would inject into a separate
+        # named world, where patching window.open would have NO effect.
+        _SAMEWIN_JS = """(function(){
+try {
+  window.open = function(url) {
+    try { if (url) { window.location.assign(url); } } catch(e) {}
+    return window;
+  };
+  document.addEventListener("click", function(ev) {
+    try {
+      var a = ev.target && ev.target.closest && ev.target.closest("a[target]");
+      if (a) { a.setAttribute("target", "_self"); }
+    } catch(e) {}
+  }, true);
+} catch(e) {}
+})();"""
+        try:
+            _script = WebKit2.UserScript.new(
+                _SAMEWIN_JS,
+                WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START,
+                None, None)
+            web.get_user_content_manager().add_script(_script)
+            _dbg("samewin: shim injected (window.open -> location.assign, target=_blank removed)")
+        except Exception as e:
+            samewin = False
+            _dbg(f"samewin: shim not injected ({e})")
+
     def _relax_storage(ns):
         """Allow persistent credentials + third-party cookies so reCAPTCHA and
         the SSO popup pages work inside the embedded view. Each call is
@@ -2047,9 +2101,24 @@ def cmd_login_window(args):
     web.connect("load-changed", on_load_changed)
     # Safety net: if the shared web process still dies mid-handshake (related
     # popup + provider SSO), reload the opener so the login window stays alive
-    # instead of showing a dead blank page.
+    # instead of showing a dead blank page. Capped at 2 reloads.
+    _terminations = [0]
     def on_web_process_terminated(_w, reason):
-        _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) — reloading opener")
+        # Bounded: a provider page that keeps killing the shared process must
+        # not put the window in a reload loop. Two reloads to recover, then
+        # stop and tell the user.
+        _terminations[0] += 1
+        n = _terminations[0]
+        if n > 2:
+            _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) - reload limit "
+                 f"reached (2 reloads), not reloading again")
+            try:
+                hint.set_text("The login page keeps crashing. Use email/password, "
+                              "or the manual code in the launcher.")
+            except Exception:
+                pass
+            return
+        _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) - reloading opener ({n}/2)")
         try:
             web.reload()
         except Exception as e:
@@ -2066,7 +2135,9 @@ def cmd_login_window(args):
     # monitorizando cada recurso con sus señales propias finished/failed +
     # get_response()/get_status_code(). URIs siempre vía _sani_uri.
     WATCH_HOSTS = ("gog.com", "recaptcha.net", "gstatic.com",
-                   "external-accounts.gog.com", "google.com")
+                   "external-accounts.gog.com", "google.com",
+                   "accounts.google.com", "steamcommunity.com",
+                   "login.live.com", "discord.com")
 
     def _watch_host(uri):
         try:
