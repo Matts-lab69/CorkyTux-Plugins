@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -34,7 +35,16 @@ HEROIC_TOOLS = HEROIC_DIR / "tools" / "runtimes"
 EAC_RUNTIME = HEROIC_TOOLS / "eac_runtime"
 BE_RUNTIME = HEROIC_TOOLS / "battleye_runtime"
 INSTALLS_JSON = CONFIG_DIR / "installs.json"
-GOG_TOKEN_JSON = CONFIG_DIR / "gog_token.json"
+# Single source of truth for the GOG session. gogdl owns it: `gogdl auth
+# --code` spends the authorization code ONCE and writes the token JSON here
+# (its --auth-config-path is a GLOBAL flag, so it must precede the
+# subcommand), and gogdl itself refreshes and rewrites the file
+# (auth.py refresh_credentials replaces the whole entry with the response).
+# GOG rotates the refresh_token on refresh, so a private copy would go stale
+# the moment gogdl refreshes -> gog_token.json is no longer used, only
+# removed on logout in case an older build left one behind.
+GOGDL_AUTH_JSON = CONFIG_DIR / "gogdl_auth.json"
+LEGACY_GOG_TOKEN_JSON = CONFIG_DIR / "gog_token.json"
 # Legendary's own session data and installed-games registry (independent
 # from Heroic's). cleanup-stale reads and backs it up but never writes it
 # directly: `legendary uninstall` is the only writer besides legendary.
@@ -152,6 +162,58 @@ def _epic_account_name():
     return ""
 
 
+def _gogdl_auth_file() -> str:
+    """Create gogdl's token file 0600 BEFORE gogdl writes it: gogdl uses a
+    plain open(path, "w") (auth.py __write_config), so a file it creates
+    itself would land with the process umask (0644). Pre-creating it with
+    os.open(..., 0o600) is the primary defence; the chmod only fixes a file
+    left behind by an older build."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(GOGDL_AUTH_JSON, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return str(GOGDL_AUTH_JSON)
+    os.close(fd)
+    try:
+        os.chmod(GOGDL_AUTH_JSON, 0o600)
+    except OSError:
+        pass
+    return str(GOGDL_AUTH_JSON)
+
+
+def _gogdl_entry() -> dict:
+    """gogdl's credential entry for our client (gogdl/auth.py keys the file by
+    client_id; its CLIENT_ID is the same 46899977096215655 we use)."""
+    data = _read_json(GOGDL_AUTH_JSON)
+    if not isinstance(data, dict):
+        return {}
+    entry = data.get(GOG_CLIENT_ID)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _gog_refresh_token() -> str:
+    return str(_gogdl_entry().get("refresh_token", "") or "")
+
+
+def _gogdl_store_entry(entry: dict) -> None:
+    """Write a refreshed entry back in gogdl's own format, because GOG rotates
+    the refresh_token: keeping our own copy would leave gogdl with a stale one
+    and break every download. Mirrors auth.py refresh_credentials
+    (entry + loginTime, whole file rewritten, 0600)."""
+    data = _read_json(GOGDL_AUTH_JSON)
+    if not isinstance(data, dict):
+        data = {}
+    stored = dict(entry)
+    stored["loginTime"] = time.time()
+    data[GOG_CLIENT_ID] = stored
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        GOGDL_AUTH_JSON.write_text(json.dumps(data))
+        os.chmod(GOGDL_AUTH_JSON, 0o600)
+    except OSError as e:
+        _auth_dbg(f"access_token: could not store rotated token ({type(e).__name__})")
+
+
 def _gog_account_name():
     # Real session check: refresh -> access token -> userData.json -> username.
     access = _gog_access_token()
@@ -220,8 +282,7 @@ def cmd_status(args):
             epic_name = _epic_account_name()
     gog_logged = False
     gog_name = ""
-    tok = _read_json(GOG_TOKEN_JSON)
-    if isinstance(tok, dict) and tok.get("refresh_token"):
+    if _gog_refresh_token():
         gog_logged = True
         if not quick:
             gog_name = _gog_account_name()
@@ -245,10 +306,13 @@ def cmd_logout(args):
                        capture_output=True, timeout=60)
         emit({"type": "done", "ok": True, "store": "epic"})
         return
-    try:
-        GOG_TOKEN_JSON.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # The session lives in gogdl's token file; the legacy plugin-only copy is
+    # removed too in case an older build left one behind.
+    for f in (GOGDL_AUTH_JSON, LEGACY_GOG_TOKEN_JSON):
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
     emit({"type": "done", "ok": True, "store": "gog"})
 
 
@@ -320,28 +384,38 @@ def cmd_auth(args):
             die(4, "No valid code found — copy the value of 'code' from the final URL (it expires in ~1 min) and paste just that.")
         _auth_dbg(f"auth gog: code len={len(code)} (raw len={len(raw)})")
         # The authorization code is SINGLE-USE, so it is spent exactly once,
-        # here, in the plugin's own exchange. It used to be handed to gogdl
-        # first (`gogdl auth --code`) and then exchanged again here, which
-        # always failed with HTTP 400 (already used) and left the plugin with
-        # no refresh token at all. gogdl cannot be the one to spend it: after
-        # a successful `gogdl auth` this machine has no gogdl credential file
-        # anywhere (~/.config/gogdl, next to the binary, CONFIG_DIR, cwd), so
-        # there is nothing to adopt, while the library, game info and the
-        # session check all read the plugin's own gog_token.json.
-        ex = _gog_exchange(code)
-        if ex == "network":
-            _auth_dbg("exchange: network")
-            die(6, "No network connection or GOG is unreachable — check your connection and retry.")
-        if not ex.startswith("ok"):
-            # ex is "rejected" or "rejected: HTTP <status>" — the code was
-            # refused by GOG (invalid / expired / already used), not a net
-            # problem, so it maps to die 4 with the expired-codes hint.
-            _auth_dbg(f"exchange: rejected ({ex})")
-            detail = ex.split(":", 1)[1].strip() if ":" in ex else ""
-            die(4, "GOG rejected the code: it is invalid, expired or was already used "
-                   "(authorization codes are single-use)"
-                   + (f" — {detail}" if detail else "")
-                   + ". Open ONE fresh tab and retry.")
+        # by gogdl, which owns the token file from now on. gogdl is also the
+        # only one that can do it correctly: its token endpoint call carries
+        # client_id AND client_secret (auth.py CODE_URL), while the plugin's
+        # own exchange sent neither secret nor config and always got HTTP 400.
+        # --auth-config-path is a GLOBAL flag, so it goes before `auth`.
+        # gogdl writes the token JSON (0600, pre-created above) AND prints it
+        # on stdout; stdout is parsed here but never logged, and neither is
+        # the parsed JSON or any token value.
+        auth_file = _gogdl_auth_file()
+        try:
+            proc = subprocess.run([GOGDL_BIN, "--auth-config-path", auth_file,
+                                   "auth", "--code", code],
+                                  capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            die(5, "Could not run gogdl. Run `setup` in the Stores tab and retry.")
+        out = (proc.stdout or "").strip()
+        _auth_dbg(f"gogdl auth rc={proc.returncode} stdout_len={len(out)}")
+        data = None
+        try:
+            data = json.loads(out) if out else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not data.get("refresh_token"):
+            # gogdl prints {"error": true} (rc=0!) when GOG refuses the code,
+            # and a traceback (rc!=0) if the file cannot be written, so the
+            # return code alone cannot be trusted.
+            _auth_dbg("gogdl auth: no refresh_token in response (rc="
+                      + str(proc.returncode) + ")")
+            die(4, "GOG rejected the code or it expired (gogdl rc="
+                   + str(proc.returncode) + "). Open ONE fresh tab and retry.")
+        _auth_dbg("gogdl auth: refresh_token stored (len="
+                  + str(len(data["refresh_token"])) + ")")
         _auth_dbg("exchange OK, checking real session")
         account = _gog_logged_in()
         if not account:
@@ -357,70 +431,13 @@ def cmd_auth(args):
           "instructions": "1) Log in to GOG in that browser tab. 2) After login you land on embed.gog.com/on_login_success?code=... — copy the 'code' value (or the whole final URL; the app accepts both). 3) Paste it in the 'Or paste code manually' box in the launcher and click Confirm code. The code expires in ~1 minute."})
 
 
-def _gog_exchange(code: str) -> str:
-    """Exchange the OAuth authorization code for a refresh token and persist
-    it. Returns:
-      "ok"                  — refresh token saved (persisted session),
-      "network"             — GOG unreachable / connection error,
-      "rejected[: detail]"  — GOG refused the code (invalid, expired or
-                              already used) or the response carried no
-                              refresh_token; "detail" carries the HTTP status
-                              when there was one.
-    Logs only steps, string lengths, return codes and HTTP status — never code
-    or token values."""
-    import urllib.request
-    import urllib.parse
-    import urllib.error
-    try:
-        data = urllib.parse.urlencode({
-            "client_id": GOG_CLIENT_ID,
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": "https://embed.gog.com/on_login_success?origin=client",
-        }).encode()
-        req = urllib.request.Request("https://auth.gog.com/token", data=data,
-                                     headers={"User-Agent": "CorkyTux/3.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            tok = json.loads(resp.read().decode())
-        if not tok.get("refresh_token"):
-            _auth_dbg("exchange: no refresh_token in response (keys="
-                      + str(sorted(tok.keys())) + ")")
-            return "rejected"
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        GOG_TOKEN_JSON.write_text(json.dumps({"refresh_token": tok["refresh_token"]}))
-        try:
-            os.chmod(GOG_TOKEN_JSON, 0o600)
-        except OSError:
-            pass
-        _auth_dbg("exchange: refresh_token persisted (len="
-                  + str(len(tok["refresh_token"])) + ")")
-        return "ok"
-    except urllib.error.HTTPError as e:
-        # HTTPError IS a subclass of URLError, so it MUST be caught first: a
-        # 4xx from the token endpoint (code invalid/expired/already used) was
-        # being reported as a network failure. Only the status is logged, not
-        # the response body.
-        _auth_dbg(f"exchange: rejected http_status={e.code}")
-        return f"rejected: HTTP {e.code}"
-    except urllib.error.URLError as e:
-        _auth_dbg(f"exchange: network error: {e.reason}")
-        return "network"
-    except TimeoutError:
-        _auth_dbg("exchange: network timeout")
-        return "network"
-    except Exception as e:
-        _auth_dbg(f"exchange: rejected ({type(e).__name__})")
-        return "rejected"
-
-
 def _gog_access_token():
     import urllib.request
     import urllib.parse
     import urllib.error
-    tok = _read_json(GOG_TOKEN_JSON)
-    refresh = (tok or {}).get("refresh_token", "")
+    refresh = _gog_refresh_token()
     if not refresh:
-        _auth_dbg("access_token: no refresh_token saved")
+        _auth_dbg("access_token: no refresh_token in gogdl auth file")
         return ""
     _auth_dbg("access_token: refresh len=" + str(len(refresh)))
     try:
@@ -432,7 +449,14 @@ def _gog_access_token():
         req = urllib.request.Request("https://auth.gog.com/token", data=data,
                                      headers={"User-Agent": "CorkyTux/3.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            at = json.loads(resp.read().decode()).get("access_token", "")
+            tok = json.loads(resp.read().decode())
+        at = tok.get("access_token", "")
+        # GOG rotates the refresh_token, so if the response carries a new one
+        # it must replace the stored entry in gogdl's format or gogdl would
+        # keep a dead one and every download would fail.
+        if tok.get("refresh_token") and tok["refresh_token"] != refresh:
+            _gogdl_store_entry(tok)
+            _auth_dbg("access_token: rotated refresh_token stored")
         _auth_dbg("access_token: obtained (len=" + str(len(at)) + ")")
         return at
     except urllib.error.URLError as e:
@@ -1204,7 +1228,11 @@ def cmd_install(args):
             exe = best
     else:
         _require_binary(GOGDL_BIN, "gogdl")
-        ok = _run_streaming([GOGDL_BIN, "download", args.app_id,
+        # gogdl reads its tokens from --auth-config-path (global flag, before
+        # the subcommand) and runs ANONYMOUS without it (auth.py
+        # get_credentials -> None -> no Authorization header in api.py).
+        ok = _run_streaming([GOGDL_BIN, "--auth-config-path", _gogdl_auth_file(),
+                             "download", args.app_id,
                              "--path", str(dest), "--platform", "windows"], store)
         if not ok:
             die(3, "gogdl download failed")
