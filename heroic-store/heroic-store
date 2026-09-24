@@ -868,6 +868,7 @@ def cmd_library(args):
     access = _gog_access_token()
     if not access:
         die(4, "GOG not logged in. Log in from the Stores tab first.")
+    status = _gog_installed_status()
     games = []
     page = 1
     try:
@@ -882,10 +883,16 @@ def cmd_library(args):
                 img = p.get("image", "") or ""
                 if img.startswith("//"):
                     img = "https:" + img + "_product_tile_256_2x.jpg"
-                games.append({"app_id": str(p.get("id", "")),
+                app_id = str(p.get("id", ""))
+                st = status.get(app_id, {})
+                verified = st.get("installed", False)
+                games.append({"app_id": app_id,
                               "title": p.get("title", ""),
                               "version": "",
-                              "installed": False,
+                              "installed": verified,
+                              "stale_registry": st.get("stale", False),
+                              "install_path": st.get("install_path", "") if verified else "",
+                              "executable": st.get("executable", "") if verified else "",
                               "cover": img})
             if page >= int(data.get("totalPages", 1)) or page >= 10:
                 break
@@ -1173,6 +1180,20 @@ def _legendary_list_installed(env_extra=None):
     return []
 
 
+def _verify_path_exe(ip: str, exe: str) -> bool:
+    """Single installed criterion shared by every store: the install dir
+    exists AND the game executable exists inside it (executable is usually
+    relative to the install dir; an empty exe only requires the dir)."""
+    if not ip or not Path(ip).is_dir():
+        return False
+    if exe:
+        ep = Path(exe)
+        if not ep.is_absolute():
+            ep = Path(ip) / exe
+        return ep.is_file()
+    return True
+
+
 def _installed_status():
     """app_name -> {"installed": bool, "stale": bool, "install_path": str,
     "executable": str}.
@@ -1193,14 +1214,32 @@ def _installed_status():
             continue
         ip = str(g.get("install_path") or "")
         exe = str(g.get("executable") or "")
-        dir_ok = bool(ip) and Path(ip).is_dir()
-        exe_ok = False
-        if exe:
-            ep = Path(exe)
-            if not ep.is_absolute():
-                ep = Path(ip) / exe
-            exe_ok = ep.is_file()
-        ok = dir_ok and (exe_ok or not exe)
+        ok = _verify_path_exe(ip, exe)
+        out[app] = {"installed": ok, "stale": not ok,
+                    "install_path": ip, "executable": exe}
+    return out
+
+
+def _gog_installed_status():
+    """app_id -> {"installed": bool, "stale": bool, "install_path": str,
+    "executable": str} for GOG, using the plugin's own registry
+    (installs.json, written by cmd_install and read by launch-info). Same
+    single criterion as Epic: registry entry AND install dir exists AND
+    executable exists on disk. GOG has no external list-installed to query,
+    so installs.json is the only reliable source; a game installed outside
+    the launcher (Heroic/Galaxy) simply has no entry and shows as not
+    installed (Install), never as a false 'installed'.
+    """
+    out = {}
+    for key, info in _read_installs().items():
+        if not key.startswith("gog:") or not isinstance(info, dict):
+            continue
+        app = key.split(":", 1)[1]
+        if not app:
+            continue
+        ip = str(info.get("path") or "")
+        exe = str(info.get("exe") or "")
+        ok = _verify_path_exe(ip, exe)
         out[app] = {"installed": ok, "stale": not ok,
                     "install_path": ip, "executable": exe}
     return out
