@@ -1854,9 +1854,50 @@ def cmd_login_window(args):
             pbox.append(pweb)
             pweb.set_vexpand(True)
             pweb.set_hexpand(True)
-            # window.close() from the popup closes the popup window (not quit)
+            # window.close() from the popup (JS) is signalled here. We must NOT
+            # destroy the popup: it is a related view of the opener (shares the
+            # web process), and destroying it synchronously at the moment the
+            # provider handshake hands the SSO result back to the opener tore
+            # down the shared process (observed: opener URI → "" and every JS
+            # poll failing with WebKitJavascriptError 601 / invalid-result).
+            # Instead, hide the window and keep the webview alive; everything
+            # is torn down when the login process exits.
+            def _on_popup_close(_pv, _w=pwin):
+                _w.set_visible(False)
             try:
-                pweb.connect("close", lambda _w, w=pwin: (w.close(), False)[1])
+                pweb.connect("close", _on_popup_close)
+            except Exception:
+                pass
+            # Same protection if the user manually closes the popup window.
+            try:
+                pwin.connect("close-request",
+                             lambda _w: (pwin.set_visible(False), True)[1])
+            except Exception:
+                pass
+            # The SSO result may land in the popup itself (final redirect to
+            # embed.gog.com/on_login_success?code=... or localhost), so capture
+            # from here too — not only from the opener.
+            def _on_popup_load(_pv, load_event):
+                if load_event != WebKit2.LoadEvent.FINISHED:
+                    return
+                puri = _pv.get_uri() or ""
+                _dbg(f"popup FINISHED uri={puri[:150]}")
+                if try_extract_code_from_uri(puri):
+                    return
+                try_extract_code_from_page(_pv)
+            try:
+                pweb.connect("load-changed", _on_popup_load)
+            except Exception:
+                pass
+            # Same anti-prompt + storage relaxations as the opener (popup pages
+            # live under external-accounts.gog.com / accounts.google.com).
+            try:
+                _relax_storage(pweb.get_network_session())
+            except Exception as e:
+                _dbg(f"popup storage relaxation failed: {e}")
+            try:
+                pweb.connect("permission-request",
+                             lambda _w, req: (req.allow(), True)[1])
             except Exception:
                 pass
             # Docs: don't show until ready-to-show (paint-ready).
@@ -1877,6 +1918,19 @@ def cmd_login_window(args):
         _dbg(f"create signal not available: {e}")
     web.connect("decide-policy", on_decide)
     web.connect("load-changed", on_load_changed)
+    # Safety net: if the shared web process still dies mid-handshake (related
+    # popup + provider SSO), reload the opener so the login window stays alive
+    # instead of showing a dead blank page.
+    def on_web_process_terminated(_w, reason):
+        _dbg(f"WEB PROCESS TERMINATED (reason={reason!r}) — reloading opener")
+        try:
+            web.reload()
+        except Exception as e:
+            _dbg(f"reload after termination failed: {e}")
+    try:
+        web.connect("web-process-terminated", on_web_process_terminated)
+    except Exception as e:
+        _dbg(f"web-process-terminated not available: {e}")
 
     # Poll: keeps checking URI + page content every 500s for 30s
     # Covers cases where load-changed misses the redirect
