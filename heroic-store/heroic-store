@@ -972,7 +972,12 @@ def cmd_game_info(args):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        die(3, f"GOG game info failed: {e}")
+        # Degradación: ficha vacía marcada parcial en vez de matar la vista.
+        emit({"type": "done", "ok": True, "store": "gog",
+              "info": {"app_id": args.app_id, "title": "", "version": "",
+                       "cover": "", "description": ""},
+              "partial": True, "warning": f"game info failed: {e}"})
+        return
     desc = (((data.get("description") or {}).get("full") or "")
             or ((data.get("description") or {}).get("lead") or ""))
     import re as _re
@@ -1043,35 +1048,51 @@ def cmd_library(args):
     status = _gog_installed_status()
     games = []
     page = 1
+    advertencia = ""
+    # Degradación por página/producto: una página o un producto roto no mata
+    # la lista entera; se emite lo que haya con partial:true. Solo la falta
+    # de sesión (arriba) sigue siendo un error duro.
     try:
         while True:
-            url = ("https://embed.gog.com/account/getFilteredProducts?mediaType=1"
-                   f"&page={page}&sortBy=title")
-            req = urllib.request.Request(url, headers={
-                "Authorization": f"Bearer {access}", "User-Agent": "CorkyTux/3.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode())
-            for p in data.get("products", []):
-                img = p.get("image", "") or ""
-                if img.startswith("//"):
-                    img = "https:" + img + "_product_tile_256_2x.jpg"
-                app_id = str(p.get("id", ""))
-                st = status.get(app_id, {})
-                verified = st.get("installed", False)
-                games.append({"app_id": app_id,
-                              "title": p.get("title", ""),
-                              "version": "",
-                              "installed": verified,
-                              "stale_registry": st.get("stale", False),
-                              "install_path": st.get("install_path", "") if verified else "",
-                              "executable": st.get("executable", "") if verified else "",
-                              "cover": img})
+            try:
+                url = ("https://embed.gog.com/account/getFilteredProducts?mediaType=1"
+                       f"&page={page}&sortBy=title")
+                req = urllib.request.Request(url, headers={
+                    "Authorization": f"Bearer {access}", "User-Agent": "CorkyTux/3.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode())
+            except Exception as e:
+                advertencia = f"page {page} failed: {e}"
+                break
+            mal = 0
+            for p in data.get("products", []) or []:
+                try:
+                    img = p.get("image", "") or ""
+                    if img.startswith("//"):
+                        img = "https:" + img + "_product_tile_256_2x.jpg"
+                    app_id = str(p.get("id", ""))
+                    st = status.get(app_id, {})
+                    verified = st.get("installed", False)
+                    games.append({"app_id": app_id,
+                                  "title": p.get("title", ""),
+                                  "category": p.get("category", "") or "",
+                                  "version": "",
+                                  "installed": verified,
+                                  "stale_registry": st.get("stale", False),
+                                  "install_path": st.get("install_path", "") if verified else "",
+                                  "executable": st.get("executable", "") if verified else "",
+                                  "cover": img})
+                except Exception:
+                    mal += 1
+            if mal:
+                advertencia = f"{mal} product(s) skipped on page {page}"
             if page >= int(data.get("totalPages", 1)) or page >= 10:
                 break
             page += 1
     except Exception as e:
-        die(3, f"GOG library failed: {e}")
-    emit({"type": "done", "ok": True, "store": "gog", "games": games})
+        advertencia = f"unexpected: {e}"
+    emit({"type": "done", "ok": True, "store": "gog", "games": games,
+          "partial": bool(advertencia), "warning": advertencia})
 
 
 def _describe_game(app_id: str, title: str, lang: str, g, match) -> bool:
@@ -2453,21 +2474,30 @@ def cmd_gog_store_search(args):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        die(3, f"GOG store search failed: {e}")
+        # Degradación: lista vacía marcada parcial en vez de matar la vista.
+        emit({"type": "done", "ok": True, "store": "gog", "results": [],
+              "partial": True, "warning": f"store search failed: {e}"})
+        return
     out = []
+    mal = 0
     for p in data.get("products", []) or []:
-        price = p.get("price") or {}
-        devs = p.get("developers") or []
-        out.append({
-            "id": str(p.get("id", "")),
-            "title": p.get("title", ""),
-            "cover": p.get("coverHorizontal", "") or p.get("coverVertical", ""),
-            "price": str(price.get("final", "")),
-            "base_price": str(price.get("base", "")),
-            "developer": devs[0] if devs else "",
-            "store_url": p.get("storeLink", ""),
-        })
-    emit({"type": "done", "ok": True, "store": "gog", "results": out})
+        try:
+            price = p.get("price") or {}
+            devs = p.get("developers") or []
+            out.append({
+                "id": str(p.get("id", "")),
+                "title": p.get("title", ""),
+                "cover": p.get("coverHorizontal", "") or p.get("coverVertical", ""),
+                "price": str(price.get("final", "")),
+                "base_price": str(price.get("base", "")),
+                "developer": devs[0] if devs else "",
+                "store_url": p.get("storeLink", ""),
+            })
+        except Exception:
+            mal += 1
+    advertencia = f"{mal} product(s) skipped" if mal else ""
+    emit({"type": "done", "ok": True, "store": "gog", "results": out,
+          "partial": bool(advertencia), "warning": advertencia})
 
 
 def cmd_eos_code(_args):
