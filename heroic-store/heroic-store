@@ -1073,9 +1073,16 @@ def cmd_library(args):
                     app_id = str(p.get("id", ""))
                     st = status.get(app_id, {})
                     verified = st.get("installed", False)
+                    # worksOn existe pero Lutris documenta que viene roto
+                    # (todo-falso): solo se publican los true, nunca se
+                    # inventa sistema. Vacío = la UI oculta esa mitad.
+                    systems = sorted(
+                        k for k, v in (p.get("worksOn") or {}).items() if v
+                    ) if isinstance(p.get("worksOn"), dict) else []
                     games.append({"app_id": app_id,
                                   "title": p.get("title", ""),
                                   "category": p.get("category", "") or "",
+                                  "systems": systems,
                                   "version": "",
                                   "installed": verified,
                                   "stale_registry": st.get("stale", False),
