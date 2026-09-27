@@ -457,7 +457,7 @@ def cmd_auth(args):
     # removed so the tab is opened exactly once, by the launcher).
     _auth_dbg("auth gog: no code — emitting auth_url (launcher opens the browser)")
     emit({"type": "auth_url", "store": "gog", "url": GOG_LOGIN_URL,
-          "instructions": "1) Log in to GOG in that browser tab. 2) After login you land on embed.gog.com/on_login_success?code=... — copy the 'code' value (or the whole final URL; the app accepts both). 3) Paste it in the 'Or paste code manually' box in the launcher and click Confirm code. The code expires in ~1 minute."})
+          "instructions": "1) Log in to GOG in the window that just opened. 2) Nothing else: the code is picked up automatically when you land on the success page."})
 
 
 def _gog_access_token():
