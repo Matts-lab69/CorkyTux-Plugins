@@ -276,6 +276,15 @@ def _status_cache_set(payload):
         pass
 
 
+def cmd_bins(_args):
+    """Solo presencia de binarios, sin red: para el pre-chequeo liviano del
+    modal de dependencias. Misma condición que `cmd_status`, sin sesión."""
+    epic_bin = Path(LEGENDARY_BIN).exists() or shutil.which("legendary") is not None
+    gog_bin = Path(GOGDL_BIN).exists() or shutil.which("gogdl") is not None
+    emit({"type": "done", "ok": True,
+          "bins": {"legendary": epic_bin, "gogdl": gog_bin}})
+
+
 def cmd_status(args):
     quick = bool(getattr(args, "quick", False))
     if quick:
@@ -2608,6 +2617,7 @@ def main():
     p_status = sub.add_parser("status")
     p_status.add_argument("--quick", action="store_true")
     sub.add_parser("setup")
+    sub.add_parser("bins")
     p_auth = sub.add_parser("auth")
     p_auth.add_argument("--store", choices=["epic", "gog"], required=True)
     p_auth.add_argument("--code", default="")
@@ -2662,6 +2672,7 @@ def main():
     dispatch = {
         "status": cmd_status,
         "setup": cmd_setup,
+        "bins": cmd_bins,
         "auth": cmd_auth,
         "logout": cmd_logout,
         "library": cmd_library,
