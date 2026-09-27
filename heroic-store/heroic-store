@@ -2507,6 +2507,157 @@ def cmd_gog_store_search(args):
           "partial": bool(advertencia), "warning": advertencia})
 
 
+# Caché en disco de los rails editoriales (públicos, sin login): TTL 1 h por
+# lista. La UI nunca pega a red directo; el rate-limit de precios queda
+# cubierto por construcción. Refresh fuerza con --refresh.
+GOG_RAIL_TTL = 3600
+GOG_RAIL_QUERIES = {
+    # (query, limit a traer, cantidad a mostrar)
+    "sale": ("search/", 30, 12),
+    "new": ("games/new", 12, 12),
+    "free": ("browse/free", 15, 8),
+}
+
+
+def _gog_rail_cache_dir() -> Path:
+    d = CONFIG_DIR / "gog_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _gog_rail_cache_get(nombre: str):
+    try:
+        data = json.loads((_gog_rail_cache_dir() / f"{nombre}.json").read_text())
+        import time as _t
+        if _t.time() - float(data.get("ts", 0)) <= float(data.get("ttl", GOG_RAIL_TTL)):
+            items = data.get("items")
+            if isinstance(items, list):
+                return items
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _gog_rail_cache_set(nombre: str, items: list) -> None:
+    try:
+        import time as _t
+        (_gog_rail_cache_dir() / f"{nombre}.json").write_text(
+            json.dumps({"ts": _t.time(), "ttl": GOG_RAIL_TTL, "items": items}))
+    except OSError:
+        pass
+
+
+def _gog_rail_fetch(query: str, limit: int):
+    """Una página del catálogo público. Devuelve la lista cruda o lanza."""
+    import urllib.request
+    import urllib.parse
+    url = ("https://catalog.gog.com/v1/catalog?query="
+           + urllib.parse.quote(query, safe="/") + "&limit=" + str(limit))
+    req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode())
+    prods = data.get("products", [])
+    return prods if isinstance(prods, list) else []
+
+
+def _gog_rail_item(p: dict) -> dict:
+    """Normaliza un producto del catálogo al schema de tarjeta de rail."""
+    price = p.get("price") or {}
+    money = price.get("finalMoney") or {}
+    try:
+        final_n = float(str(money.get("amount", "")))
+    except (ValueError, TypeError):
+        final_n = -1.0
+    disc = str(price.get("discount") or "")
+    try:
+        disc_n = abs(float(disc.strip().strip("%")))
+    except (ValueError, TypeError):
+        disc_n = 0.0
+    fecha = str(p.get("storeReleaseDate") or p.get("releaseDate") or "")
+    anio = fecha[:4] if len(fecha) >= 4 and fecha[:4].isdigit() else ""
+    cover = p.get("coverVertical", "") or p.get("coverHorizontal", "")
+    return {
+        "id": str(p.get("id", "")),
+        "title": str(p.get("title", "")),
+        "cover": cover,
+        "ptype": str(p.get("productType", "") or ""),
+        "price_base": str(price.get("base", "")),
+        "price_final": str(price.get("final", "")),
+        "discount": disc,
+        "discount_n": disc_n,
+        "year": anio,
+        "free": final_n == 0.0,
+        "store_url": p.get("storeLink", "") or "",
+        "_final_n": final_n,
+    }
+
+
+def cmd_gog_rail(args):
+    """Rails editoriales de GOG (catálogo público, sin login): sale, new,
+    free. Con caché TTL; degradación parcial como el resto de Fase 1."""
+    nombre = (args.list or "").strip()
+    if nombre not in GOG_RAIL_QUERIES:
+        die(2, f"unknown rail: {nombre} (sale|new|free)")
+    if not getattr(args, "refresh", False):
+        hit = _gog_rail_cache_get(nombre)
+        if hit is not None:
+            emit({"type": "done", "ok": True, "store": "gog", "rail": nombre,
+                  "items": hit, "partial": False, "warning": "",
+                  "cached": True})
+            return
+    query, limit, top = GOG_RAIL_QUERIES[nombre]
+    try:
+        prods = _gog_rail_fetch(query, limit)
+    except Exception as e:
+        emit({"type": "done", "ok": True, "store": "gog", "rail": nombre,
+              "items": [], "partial": True,
+              "warning": f"rail failed: {e}", "cached": False})
+        return
+    items = []
+    mal = 0
+    for p in prods:
+        try:
+            if not isinstance(p, dict):
+                raise ValueError("not a dict")
+            items.append(_gog_rail_item(p))
+        except Exception:
+            mal += 1
+    # On Sale se ordena acá (el API no ordena por descuento): top por %.
+    # New/free conservan el orden del API.
+    if nombre == "sale":
+        items.sort(key=lambda x: x.get("discount_n", 0.0), reverse=True)
+        # Sin descuento real no es "sale": se filtra para no mostrar
+        # precio lleno con badge 0 %.
+        items = [x for x in items if x.get("discount_n", 0.0) > 0][:top]
+    elif nombre == "free":
+        # browse/free trae pagado, DLCs y placeholders ("TEST TEST TEST"):
+        # solo juegos con precio 0 real. El filtro de placeholder es mínimo
+        # a propósito (palabra repetida): sin arquitectura de curaduría.
+        # Las herramientas gratis y reales (REDkit, ...) van al final.
+        import re as _re
+        def _es_basura(t: str) -> bool:
+            bajo = t.strip().lower()
+            return bool(bajo) and _re.search(r"\b(\w+)(\s+\1)+\b", bajo) is not None
+        limpios = [x for x in items
+                   if x.get("free") and x.get("ptype") == "game"
+                   and not _es_basura(x.get("title", ""))]
+        tools = ("redkit", "toolkit", "modkit", "sdk", "editor")
+        juegos = [x for x in limpios
+                  if not any(k in x.get("title", "").lower() for k in tools)]
+        herrs = [x for x in limpios
+                 if any(k in x.get("title", "").lower() for k in tools)]
+        items = (juegos + herrs)[:top]
+    else:
+        items = items[:top]
+    for x in items:
+        x.pop("_final_n", None)
+    advertencia = f"{mal} product(s) skipped" if mal else ""
+    _gog_rail_cache_set(nombre, items)
+    emit({"type": "done", "ok": True, "store": "gog", "rail": nombre,
+          "items": items, "partial": bool(advertencia),
+          "warning": advertencia, "cached": False})
+
+
 def cmd_eos_code(_args):
     """Epic Online Services exchange code for launching EOS games
     (Fall Guys & co. refuse to start without -auth_password=<code>).
@@ -2674,6 +2825,9 @@ def main():
     p_gss = sub.add_parser("gog-store-search")
     p_gss.add_argument("--query", default="")
     p_gss.add_argument("--limit", type=int, default=10)
+    p_rail = sub.add_parser("gog-rail")
+    p_rail.add_argument("--list", choices=["sale", "new", "free"], required=True)
+    p_rail.add_argument("--refresh", action="store_true")
     p_ins = sub.add_parser("install")
     p_ins.add_argument("--store", choices=["epic", "gog"], required=True)
     p_ins.add_argument("--app-id", required=True)
@@ -2718,6 +2872,7 @@ def main():
         "free-promos": cmd_free_promos,
         "epic-deals": cmd_epic_deals,
         "gog-store-search": cmd_gog_store_search,
+        "gog-rail": cmd_gog_rail,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "cleanup-stale": cmd_cleanup_stale,
