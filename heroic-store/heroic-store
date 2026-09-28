@@ -142,8 +142,32 @@ def cmd_setup(_args):
 def _read_json(path: Path):
     try:
         return json.loads(path.read_text())
-    except (OSError, ValueError):
+    except OSError:
         return None
+    except ValueError:
+        pass
+    # Archivo a medio escribir por gogdl (rota el token y reescribe el
+    # fichero entero): reintenta antes de declararlo ilegible.
+    for _ in range(2):
+        time.sleep(0.1)
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def _atomic_write_json(path: Path, payload: str, mode: int = 0) -> None:
+    """Escritura atómica (tmp + rename). Con mode != 0 el tmp nace ya con
+    esos permisos (tokens: nada legible por otros ni por un instante)."""
+    tmp = path.with_name(path.name + ".tmp")
+    if mode:
+        fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, mode)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+    else:
+        tmp.write_text(payload)
+    os.replace(tmp, path)
 
 
 def _read_installs():
@@ -153,7 +177,7 @@ def _read_installs():
 
 def _write_installs(data: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    INSTALLS_JSON.write_text(json.dumps(data, indent=2))
+    _atomic_write_json(INSTALLS_JSON, json.dumps(data, indent=2))
 
 
 def _epic_account_name():
@@ -211,7 +235,7 @@ def _gog_refresh_token() -> str:
     return str(_gogdl_entry().get("refresh_token", "") or "")
 
 
-def _gogdl_store_entry(entry: dict) -> None:
+def _gogdl_store_entry(entry: dict, refresh_used: str = "") -> None:
     """Write a refreshed entry back in gogdl's own format, because GOG rotates
     the refresh_token: keeping our own copy would leave gogdl with a stale one
     and break every download. Mirrors auth.py refresh_credentials
@@ -219,12 +243,21 @@ def _gogdl_store_entry(entry: dict) -> None:
     data = _read_json(GOGDL_AUTH_JSON)
     if not isinstance(data, dict):
         data = {}
+    # Compare-and-swap: si gogdl rotó desde nuestra lectura, su entrada es
+    # la válida y la nuestra (derivada del token viejo) está muerta: no
+    # escribir. cur ausente o sin refresh_token (None/"") NO es rotación:
+    # se escribe igual.
+    cur = data.get(GOG_CLIENT_ID)
+    cur_rt = cur.get("refresh_token") if isinstance(cur, dict) else None
+    if cur_rt not in (None, "", refresh_used):
+        _auth_dbg("access_token: gogdl rotated meanwhile, keeping its entry")
+        return
     stored = dict(entry)
     stored["loginTime"] = time.time()
     data[GOG_CLIENT_ID] = stored
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        GOGDL_AUTH_JSON.write_text(json.dumps(data))
+        _atomic_write_json(GOGDL_AUTH_JSON, json.dumps(data), mode=0o600)
         os.chmod(GOGDL_AUTH_JSON, 0o600)
     except OSError as e:
         _auth_dbg(f"access_token: could not store rotated token ({type(e).__name__})")
@@ -495,7 +528,7 @@ def _gog_access_token():
         # it must replace the stored entry in gogdl's format or gogdl would
         # keep a dead one and every download would fail.
         if tok.get("refresh_token") and tok["refresh_token"] != refresh:
-            _gogdl_store_entry(tok)
+            _gogdl_store_entry(tok, refresh)
             _auth_dbg("access_token: rotated refresh_token stored")
         _auth_dbg("access_token: obtained (len=" + str(len(at)) + ")")
         return at
@@ -1225,24 +1258,112 @@ def cmd_refresh_library(args):
 
 
 _PROGRESS_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+_GOG_PROGRESS_RE = re.compile(r"=\s*Progress:\s*(\d+(?:\.\d+)?)\s+(\d+)\s*/\s*(\d+)")
+_GOG_ETA_RE = re.compile(r"ETA:\s*(\d+):(\d+):(\d+)")
+_GOG_SPEED_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*MiB/s\s*\(raw\)")
 
 
-def _run_streaming(cmd, store):
+def _parse_progress_line(line: str):
+    """Línea de log gogdl/legendary → dict de evento o None si no es progreso.
+    Pura (sin IO): la cubren los tests sin red. NOTA: written_raw/total_raw
+    son contadores sin unidad confirmada (NO afirmar bytes hasta captura
+    real); percent y eta_s sí son seguros por construcción."""
+    m = _GOG_PROGRESS_RE.search(line)
+    if m:
+        eta = None
+        me = _GOG_ETA_RE.search(line)
+        if me:
+            eta = int(me.group(1)) * 3600 + int(me.group(2)) * 60 + int(me.group(3))
+        return {"stage": "downloading", "percent": float(m.group(1)),
+                "written_raw": int(m.group(2)), "total_raw": int(m.group(3)),
+                "eta_s": eta}
+    ms = _GOG_SPEED_RE.search(line)
+    if ms:
+        return {"stage": "downloading", "percent": None,
+                "speed_mibs": float(ms.group(1))}
+    m = _PROGRESS_RE.search(line)
+    if m:
+        try:
+            pct = float(m.group(1))
+        except ValueError:
+            pct = None
+        return {"stage": "downloading", "percent": pct}
+    return None
+
+
+def _run_streaming(cmd, store, ppid=0):
+    import signal
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        m = _PROGRESS_RE.search(line)
-        if m:
+    prev_term = signal.getsignal(signal.SIGTERM)
+
+    def _on_term(_signo, _frame):
+        # Cancelación del launcher: terminar gogdl antes de salir
+        # (terminate, 2 s de gracia, kill). El marker partial queda y
+        # permite reanudar.
+        try:
+            proc.terminate()
             try:
-                pct = float(m.group(1))
-            except ValueError:
-                pct = None
-            emit({"type": "progress", "stage": "downloading", "percent": pct, "store": store})
-        else:
-            emit({"type": "progress", "stage": line[:120], "percent": None, "store": store})
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        finally:
+            try:
+                signal.signal(signal.SIGTERM, prev_term)
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                os._exit(128 + 15)
+
+    signal.signal(signal.SIGTERM, _on_term)
+    speed = None
+    last_emit = 0.0
+    first = True
+    pending = None
+    try:
+        for line in proc.stdout:
+            # Self-exit si el launcher murió. LIMITACIÓN explícita: solo
+            # corre al llegar una línea; un gogdl colgado sin salida no lo
+            # dispara (lo cubre el watchdog/kill del launcher en el paso d).
+            if ppid:
+                try:
+                    if os.getppid() != ppid:
+                        proc.kill()
+                        return False
+                except Exception:
+                    proc.kill()
+                    return False
+            line = line.strip()
+            if not line:
+                continue
+            ev = _parse_progress_line(line)
+            if ev is None:
+                ev = {"stage": line[:120], "percent": None}
+            elif ev.get("speed_mibs") is not None and ev.get("percent") is None:
+                speed = ev["speed_mibs"]
+                continue  # velocidad sola: se adjunta al próximo Progress
+            else:
+                if ev.get("percent") is not None and speed is not None:
+                    ev["speed_mibs"] = speed
+            ev["store"] = store
+            # Throttle ~2/s: siempre el primero y el último (pending).
+            now = time.monotonic()
+            if first or now - last_emit >= 0.5:
+                if pending is not None:
+                    emit(pending)
+                    pending = None
+                emit(ev)
+                last_emit = now
+                first = False
+            else:
+                pending = ev
+        if pending is not None:
+            emit(pending)
+            pending = None
+    finally:
+        try:
+            signal.signal(signal.SIGTERM, prev_term)
+        except Exception:
+            pass
     proc.wait()
     return proc.returncode == 0
 
@@ -1256,6 +1377,81 @@ def _legendary_info(app_id: str):
         return json.loads(proc.stdout or "{}")
     except (ValueError, subprocess.TimeoutExpired, OSError):
         return {}
+
+
+_AUTH_ERR_RE = re.compile(
+    r"unauthori|forbidden|\b401\b|\b403\b|token (expired|invalid)|"
+    r"not (logged|authenticated)|\blogin\b", re.IGNORECASE)
+
+
+def _gog_info_raw(app_id: str, platform: str):
+    """(info_dict, stderr). {} ante cualquier fallo: el llamador degrada
+    (sin --lang) o muere con mensaje accionable (auth → re-login)."""
+    try:
+        proc = subprocess.run(
+            [GOGDL_BIN, "--auth-config-path", _gogdl_auth_file(),
+             "info", app_id, "--platform", platform],
+            capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {}, f"spawn failed: {type(e).__name__}"
+    if proc.returncode != 0:
+        return {}, proc.stderr or ""
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return {}, (proc.stderr or "") + " bad-json"
+    return (data if isinstance(data, dict) else {}), proc.stderr or ""
+
+
+def _gog_pick_lang(info: dict, override: str) -> str:
+    """en-US si está en languages, si no el primero, si no "". Pura."""
+    if override:
+        return override
+    langs = [str(x) for x in (info.get("languages") or []) if str(x)]
+    if not langs:
+        return ""
+    return "en-US" if "en-US" in langs else langs[0]
+
+
+def _gog_has_linux_build(info: dict) -> bool:
+    """Pura: ¿builds[].os del info (windows) incluye linux? NUNCA invoca a
+    `info --platform linux`: ese manager crashea con traceback si no hay
+    build nativo."""
+    try:
+        items = (info.get("builds") or {}).get("items", []) or []
+    except AttributeError:
+        return False
+    return any(str((b or {}).get("os") or "").lower() == "linux" for b in items)
+
+
+def _sanitize_folder(name: str, fallback: str) -> str:
+    keep = "".join(c for c in (name or "")
+                   if c.isalnum() or c in (" ", "-", "_", ".", "(", ")", "[", "]"))
+    keep = re.sub(r"\s+", " ", keep).strip(" .")
+    return keep or fallback
+
+
+def _gog_game_dir(base: Path, app_id: str, info: dict) -> Path:
+    """<base>/<folder_name sanitizado>: no se depende de cómo gogdl cree
+    subdirectorios; el launcher pasa la base y el plugin fija la carpeta."""
+    d = base / _sanitize_folder(str(info.get("folder_name") or ""), app_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _mark_partial(store: str, app_id: str, path: str) -> None:
+    """Marca partial ANTES de descargar (permite Reanudar). Si ya hay una
+    entrada completa con carpeta presente → error claro (repair/update
+    fuera de alcance); registro huérfano (carpeta ausente) se pisa."""
+    regs = _read_installs()
+    key = f"{store}:{app_id}"
+    cur = regs.get(key)
+    if isinstance(cur, dict) and cur.get("status") != "partial":
+        if cur.get("path") and Path(str(cur["path"])).exists():
+            die(4, f"already installed at {cur.get('path')} (repair/update out of scope)")
+    regs[key] = {"path": path, "exe": "", "status": "partial",
+                 "started": int(time.time())}
+    _write_installs(regs)
 
 
 def cmd_install(args):
@@ -1299,11 +1495,28 @@ def cmd_install(args):
         # gogdl reads its tokens from --auth-config-path (global flag, before
         # the subcommand) and runs ANONYMOUS without it (auth.py
         # get_credentials -> None -> no Authorization header in api.py).
-        ok = _run_streaming([GOGDL_BIN, "--auth-config-path", _gogdl_auth_file(),
-                             "download", args.app_id,
-                             "--path", str(dest), "--platform", "windows"], store)
+        platform = getattr(args, "platform", "") or "windows"
+        if platform not in ("windows", "linux"):
+            die(2, f"unsupported platform '{platform}' (want windows|linux)")
+        info, info_err = _gog_info_raw(args.app_id, "windows")
+        if not info and _AUTH_ERR_RE.search(info_err or ""):
+            die(8, "GOG session expired or invalid (re-login in the Stores tab)")
+        if platform == "linux" and not _gog_has_linux_build(info):
+            die(6, "no Linux build for this game (Windows-only)")
+        lang = _gog_pick_lang(info, getattr(args, "lang", "") or "")
+        dest = _gog_game_dir(dest, args.app_id, info)
+        dl = [GOGDL_BIN, "--auth-config-path", _gogdl_auth_file(),
+              "download", args.app_id, "--path", str(dest),
+              "--platform", platform]
+        if lang:
+            dl += ["--lang", lang]
+        _mark_partial(store, args.app_id, str(dest))
+        try:
+            ok = _run_streaming(dl, store, ppid=int(getattr(args, "ppid", 0) or 0))
+        except Exception as e:
+            die(3, f"gogdl download failed: {type(e).__name__}: {str(e)[:150]}")
         if not ok:
-            die(3, "gogdl download failed")
+            die(3, "gogdl download failed (partial kept for resume)")
         ipath, exe, platform = _gog_probe(dest, args.app_id)
     regs = _read_installs()
     regs[f"{store}:{args.app_id}"] = {"path": ipath, "exe": exe}
@@ -1564,7 +1777,8 @@ def _gog_installed_status():
         exe = str(info.get("exe") or "")
         ok = _verify_path_exe(ip, exe)
         out[app] = {"installed": ok, "stale": not ok,
-                    "install_path": ip, "executable": exe}
+                    "install_path": ip, "executable": exe,
+                    "partial": info.get("status") == "partial"}
     return out
 
 
@@ -2834,6 +3048,9 @@ def main():
     p_ins.add_argument("--store", choices=["epic", "gog"], required=True)
     p_ins.add_argument("--app-id", required=True)
     p_ins.add_argument("--path", default="")
+    p_ins.add_argument("--lang", default="")
+    p_ins.add_argument("--platform", choices=["windows", "linux"], default="windows")
+    p_ins.add_argument("--ppid", type=int, default=0)
     p_un = sub.add_parser("uninstall")
     p_un.add_argument("--store", choices=["epic", "gog"], required=True)
     p_un.add_argument("--app-id", required=True)
