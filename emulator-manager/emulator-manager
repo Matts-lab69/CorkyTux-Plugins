@@ -53,11 +53,11 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "show_osd", "type": "bool", "default": True,
-             "desc": "Mostrar OSD (overlay de pantalla)"},
+             "desc": "Show OSD (on-screen overlay)"},
             {"id": "jit_enable", "type": "bool", "default": True,
-             "desc": "Habilitar JIT (mayor velocidad)"},
+             "desc": "Enable JIT (faster)"},
         ],
     },
     "Dolphin": {
@@ -68,9 +68,9 @@ EMULATORS = {
         "launch_args": "-e {rom}",
         "settings": [
             {"id": "batch", "type": "bool", "default": False,
-             "desc": "Lote (ejecutar sin abrir la interfaz)"},
+             "desc": "Batch (run without opening the interface)"},
             {"id": "user_dir", "type": "path", "default": "",
-             "desc": "Carpeta de guardados y configuración"},
+             "desc": "Saves and configuration folder"},
         ],
     },
     "Mupen64Plus": {
@@ -81,9 +81,9 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "hide_osd", "type": "bool", "default": False,
-             "desc": "Ocultar OSD (overlay de pantalla)"},
+             "desc": "Hide OSD (on-screen overlay)"},
         ],
     },
     "PCSX2": {
@@ -94,9 +94,9 @@ EMULATORS = {
         "launch_args": "-nofs -fullscreen {rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "exit_on_pause", "type": "bool", "default": False,
-             "desc": "Salir al abrir menú de pausa"},
+             "desc": "Exit when the pause menu opens"},
         ],
     },
     "PPSSPP": {
@@ -107,7 +107,7 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "no_gui", "type": "bool", "default": False,
-             "desc": "Sin GUI (ejecutar directamente el juego)"},
+             "desc": "No GUI (run the game directly)"},
         ],
     },
     "RPCS3": {
@@ -118,11 +118,11 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "full_boot", "type": "bool", "default": False,
-             "desc": "Arranque completo (sin saltar animación PS3)"},
+             "desc": "Full boot (skip the PS3 intro animation)"},
             {"id": "no_gui", "type": "bool", "default": False,
-             "desc": "Sin GUI (ejecutar directamente el juego)"},
+             "desc": "No GUI (run the game directly)"},
         ],
     },
     "Ryujinx": {
@@ -133,9 +133,9 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "keys_path", "type": "path", "default": "",
-             "desc": "Ruta de claves de cifrado (prod.keys)"},
+             "desc": "Path to the decryption keys file (prod.keys)"},
             {"id": "title_keys_path", "type": "path", "default": "",
-             "desc": "Ruta de claves de título (title.keys)"},
+             "desc": "Path to the title keys file (title.keys)"},
         ],
     },
     "Vita3K": {
@@ -146,11 +146,11 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "config_path", "type": "path", "default": "",
-             "desc": "Ubicación de configuración personalizada"},
+             "desc": "Custom configuration location"},
             {"id": "load_config", "type": "bool", "default": False,
-             "desc": "Cargar archivo de configuración"},
+             "desc": "Load configuration file"},
         ],
     },
     "Azahar": {
@@ -161,7 +161,7 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
         ],
     },
     "DuckStation": {
@@ -172,9 +172,9 @@ EMULATORS = {
         "launch_args": "-batch {rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "no_gui", "type": "bool", "default": False,
-             "desc": "Sin GUI (ejecutar directamente el juego)"},
+             "desc": "No GUI (run the game directly)"},
         ],
     },
     "Cemu": {
@@ -185,9 +185,9 @@ EMULATORS = {
         "launch_args": "-f {rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "mlc_path", "type": "path", "default": "",
-             "desc": "Ubicación personalizada de la carpeta mlc"},
+             "desc": "Custom location of the mlc folder"},
         ],
     },
     "Desmume": {
@@ -198,9 +198,9 @@ EMULATORS = {
         "launch_args": "{rom}",
         "settings": [
             {"id": "fullscreen", "type": "bool", "default": True,
-             "desc": "Pantalla completa"},
+             "desc": "Fullscreen"},
             {"id": "frameskip", "type": "bool", "default": False,
-             "desc": "Saltar frames (mayor velocidad, menos fluido)"},
+             "desc": "Skip frames (faster, less smooth)"},
         ],
     },
 }
