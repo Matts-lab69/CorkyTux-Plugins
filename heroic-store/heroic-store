@@ -20,6 +20,11 @@ import webbrowser
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "CorkyTux" / "plugins" / "heroic-store"
+# gogdl en su propio CONFIG_DIR (manifests incluidos): no reutilizar las
+# carpetas de Heroic (~/.config/heroic_gogdl) para no colisionar si el
+# usuario también usa Heroic. Solo afecta a gogdl hijo (auth va por
+# --auth-config-path explícito, ya separada).
+os.environ.setdefault("GOGDL_CONFIG_PATH", str(CONFIG_DIR / "gogdl"))
 # Shared Steam API minimum gap, enforced across plugin processes via a
 # timestamp file (the launcher can run a library refresh and modal
 # game-info calls at the same time; a per-process sleep would let the two
@@ -287,6 +292,17 @@ def _gog_logged_in() -> str:
 
 
 STATUS_CACHE = CONFIG_DIR / ".status_cache.json"
+
+
+def _status_cache_invalidate() -> bool:
+    """Borra el caché de `status` (bins/sesión). Las demás cachés
+    (rails TTL, descriptions con prune en refresh) no cambian con
+    install/uninstall: se invalidan por su propia vía."""
+    try:
+        STATUS_CACHE.unlink()
+        return True
+    except OSError:
+        return not STATUS_CACHE.exists()
 
 
 def _status_cache_get(max_age_s=60):
@@ -997,12 +1013,15 @@ def cmd_game_info(args):
     access = _gog_access_token()
     if not access:
         die(4, "GOG not logged in.")
+    # Presupuesto total de red para game-info: 6 s (5 s por llamada).
+    t0 = time.monotonic()
+    budget = lambda: max(0.01, min(5.0, 6.0 - (time.monotonic() - t0)))
     try:
         import urllib.request
         req = urllib.request.Request(
             f"https://embed.gog.com/account/gameDetails/{args.app_id}.json",
             headers={"Authorization": f"Bearer {access}", "User-Agent": "CorkyTux/3.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=budget()) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
         # Degradación: ficha vacía marcada parcial en vez de matar la vista.
@@ -1015,14 +1034,135 @@ def cmd_game_info(args):
             or ((data.get("description") or {}).get("lead") or ""))
     import re as _re
     desc = _re.sub(r"<[^>]+>", "", desc)[:1500]
+    desc_source = ""
     bg = data.get("backgroundImage", "") or ""
     if bg.startswith("//"):
         bg = "https:" + bg
+    key = f"gog:{args.app_id}"
+    saved = _descriptions_load().get(key)
+    saved = saved if isinstance(saved, dict) else {}
+    if not desc.strip() and saved.get("description"):
+        # 1) caché propia (guardado único, como Epic).
+        desc = str(saved.get("description") or "")
+        desc_source = str(saved.get("source") or "")
+    vert = str(saved.get("cover") or "")
+    if vert and saved.get("cover_src") not in (None, "", "v2-box"):
+        # Entrada legacy con cover no vertical: reintentar v2; se
+        # reemplaza solo si llega un vertical real.
+        vert = ""
+    fresh_vert = ""
+    if not desc.strip() or not vert:
+        # 2) un solo fetch v2 sirve banner+desc, con presupuesto; se
+        # salta si ya se resolvió. Cadena: vertical v2 → bg con
+        # extensión → .jpg → "" (el modal cae al tile).
+        v2_box, v2_desc = _gog_v2_game(args.app_id, timeout=budget())
+        if not desc.strip() and v2_desc:
+            desc, desc_source = v2_desc, "gog"
+        if not vert:
+            fresh_vert = v2_box
+            vert = fresh_vert
+        cover = _gog_modal_cover(vert, bg, "")
+        # 4) guardado único: solo datos nuevos reales, nunca fallos. El
+        # wipe de Refresh borra la entrada entera (cover_src incluido).
+        merged = _gog_merge_entry(saved, desc, desc_source, fresh_vert, "v2-box")
+        if merged is not None:
+            _descriptions_save(key, merged)
+    else:
+        cover = _gog_modal_cover(vert, bg, "")
     emit({"type": "done", "ok": True, "store": "gog", "info": {
         "app_id": args.app_id, "title": data.get("title", ""),
-        "version": "", "cover": bg, "description": desc,
+        "version": "", "cover": cover, "description": desc,
+        "description_source": desc_source,
         "developer": "", "store_url": f"https://www.gog.com/game/{args.app_id}",
     }})
+
+
+def _gog_modal_cover(vert: str, bg: str, pub_bg: str) -> str:
+    """Pura: coverVertical → background con extensión → público → .jpg → "".
+    "" deja que el modal use el cover del tile (fallback del launcher)."""
+    if vert:
+        return vert
+    if bg and bg.lower().endswith(IMG_EXTS):
+        return bg
+    if pub_bg:
+        return pub_bg
+    if bg:
+        return bg + ".jpg"
+    return ""
+
+
+def _gog_merge_entry(saved: dict, desc: str, desc_source: str,
+                     fresh_vert: str, vert_src: str = ""):
+    """Pura: entrada a guardar (una sola vez) o None si no hay nada nuevo.
+    Nunca guarda fallos (""/"") ni reescribe lo ya guardado."""
+    saved = saved if isinstance(saved, dict) else {}
+    entry = dict(saved)
+    changed = False
+    if desc.strip() and desc != saved.get("description"):
+        entry.update({"description": desc,
+                      "source": desc_source or saved.get("source", ""),
+                      "source_url": "", "lang": saved.get("lang", "en")})
+        changed = True
+    if fresh_vert and fresh_vert != saved.get("cover"):
+        entry["cover"] = fresh_vert
+        if vert_src:
+            entry["cover_src"] = vert_src
+        changed = True
+    if not changed:
+        return None
+    if not entry.get("description") and not entry.get("cover"):
+        return None
+    entry["saved_at"] = time.time()
+    return entry
+
+
+def _gog_v2_game(app_id: str, timeout: float = 5):
+    """(boxart_vertical, description) desde api.gog.com/v2/games/<id>.
+    Un solo fetch sirve banner y descripción (description es string con
+    HTML: se limpia igual que v1). ("","") ante fallo o 404, sin
+    excepciones hacia la UI.
+    Backup documentado (NO implementado): gamesdb
+    platforms/gog/external_releases/<id> → game.vertical_cover.url_format
+    con formatter _glx_vertical_cover (verificado 342×482 en 1831618557
+    y 1542190742). Solo si v2 muere."""
+    if timeout <= 0:
+        return "", ""
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://api.gog.com/v2/games/{app_id}",
+            headers={"User-Agent": "CorkyTux/3.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            d = json.loads(resp.read().decode())
+        if not isinstance(d, dict):
+            return "", ""
+        links = d.get("_links") or {}
+        boxart = str(((links.get("boxArtImage") or {}).get("href")) or "")
+        if boxart.startswith("//"):
+            boxart = "https:" + boxart
+        import re as _re
+        import html as _html
+        txt = _re.sub(r"<[^>]+>", "", str(d.get("description") or ""))
+        txt = _html.unescape(txt).strip()[:1500]
+        return boxart, txt
+    except Exception:
+        return "", ""
+
+
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+
+def _gog_desc_wipe(data: dict) -> dict:
+    """Puro: Refresh explícito — borra TODAS las claves gog:, conserva
+    el resto (Epic y demás). Re-resuelven al abrir cada ficha."""
+    return {k: v for k, v in data.items() if not k.startswith("gog:")}
+
+
+def _gog_desc_prune(data: dict, vivas: set) -> dict:
+    """Puro: cargas normales — solo poda gog: de juegos ausentes."""
+    return {k: v for k, v in data.items()
+            if not (k.startswith("gog:") and k not in vivas)}
 
 
 def cmd_library(args):
@@ -1131,6 +1271,19 @@ def cmd_library(args):
             page += 1
     except Exception as e:
         advertencia = f"unexpected: {e}"
+    # descriptions.json (claves gog:, nunca Epic): Refresh explícito
+    # (--refresh) invalida todo y re-resuelve; cargas normales solo
+    # podan ausentes. Solo con lista completa y no vacía.
+    if not advertencia and games:
+        vivas = {"gog:" + str(g.get("app_id", "")) for g in games if g.get("app_id")}
+        if vivas:
+            data = _descriptions_load()
+            if getattr(args, "refresh", False):
+                nueva = _gog_desc_wipe(data)
+            else:
+                nueva = _gog_desc_prune(data, vivas)
+            if nueva != data:
+                _write_json_atomic(DESCRIPTIONS_FILE, nueva)
     emit({"type": "done", "ok": True, "store": "gog", "games": games,
           "partial": bool(advertencia), "warning": advertencia})
 
@@ -1431,12 +1584,97 @@ def _sanitize_folder(name: str, fallback: str) -> str:
     return keep or fallback
 
 
-def _gog_game_dir(base: Path, app_id: str, info: dict) -> Path:
-    """<base>/<folder_name sanitizado>: no se depende de cómo gogdl cree
-    subdirectorios; el launcher pasa la base y el plugin fija la carpeta."""
-    d = base / _sanitize_folder(str(info.get("folder_name") or ""), app_id)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+# Una sola lista de exclusiones para Epic y GOG (instaladores, helpers,
+# crash-handlers: nunca son el juego).
+_EXE_IGNORE = ("unins", "crashhandler", "setup", "redist", "vcredist", "installer")
+
+
+def _exe_excluded(filename: str) -> bool:
+    """Puro: ¿el nombre huele a instalador/helper?"""
+    return any(s in Path(filename).stem.lower() for s in _EXE_IGNORE)
+
+
+def _gog_pick_task(tasks: list) -> str:
+    """Puro: isPrimary .exe (no excluido) > primer filetask .exe (no
+    excluido) > "". gogdl marca isPrimary en el import."""
+    cands = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        path = str(task.get("path", "") or "")
+        if ((task.get("type") or "").lower() != "filetask"
+                or not path.lower().endswith(".exe")
+                or _exe_excluded(path)):
+            continue
+        cands.append((bool(task.get("isPrimary")), path))
+    for primary, path in cands:
+        if primary:
+            return path
+    return cands[0][1] if cands else ""
+
+
+def _gog_dir_parece_juego(d: Path) -> bool:
+    """Puro salvo IO local: goggame-*.info o algún .exe directo."""
+    try:
+        if d.is_dir():
+            names = [p.name for p in d.iterdir()]
+            return (any(n.startswith("goggame-") and n.endswith(".info") for n in names)
+                    or any(n.lower().endswith(".exe") for n in names))
+    except OSError:
+        pass
+    return False
+
+
+def _gogdl_manifests_dir() -> Path:
+    """Espeja gogdl/constants.py (CONFIG_DIR + override GOGDL_CONFIG_PATH)."""
+    import os as _os
+    base = _os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    cfg = _os.environ.get("GOGDL_CONFIG_PATH")
+    root = Path(cfg, "heroic_gogdl") if cfg else Path(base, "heroic_gogdl")
+    return root / "manifests"
+
+
+def _gog_old_manifests_dir() -> Path:
+    """Dir compartido legacy (~/.config/heroic_gogdl): SOLO lectura,
+    nunca se escribe ni se migra nada ahí."""
+    import os as _os
+    base = _os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base, "heroic_gogdl") / "manifests"
+
+
+def _gog_manifest_source(app_id: str) -> str:
+    """'new' | 'old' | ''. Dónde está el manifest (nuevo primero)."""
+    try:
+        if (_gogdl_manifests_dir() / str(app_id)).is_file():
+            return "new"
+        if (_gog_old_manifests_dir() / str(app_id)).is_file():
+            return "old"
+    except OSError:
+        pass
+    return ""
+
+
+def _gog_has_manifest(app_id: str) -> bool:
+    """Puro salvo IO local: ¿hay manifest (nuevo o viejo)?"""
+    return _gog_manifest_source(app_id) != ""
+
+
+def _gog_find_game_dir(base: Path, folder: str) -> Path:
+    """Tras `download --path <base>`, gogdl crea <base>/<folder>. Se usa
+    si parece juego; si no, se prueba UN nivel de subdirectorios (cubre
+    instalaciones legacy con doble nesting); si no, base (nunca se
+    pierde la instalación). Acota el walk del probe al juego."""
+    cand = base / folder
+    if _gog_dir_parece_juego(cand):
+        return cand
+    try:
+        subs = sorted(p for p in cand.iterdir() if p.is_dir())
+    except OSError:
+        subs = []
+    for sub in subs:
+        if _gog_dir_parece_juego(sub):
+            return sub
+    return base
 
 
 def _mark_partial(store: str, app_id: str, path: str) -> None:
@@ -1447,16 +1685,103 @@ def _mark_partial(store: str, app_id: str, path: str) -> None:
     key = f"{store}:{app_id}"
     cur = regs.get(key)
     if isinstance(cur, dict) and cur.get("status") != "partial":
-        if cur.get("path") and Path(str(cur["path"])).exists():
-            die(4, f"already installed at {cur.get('path')} (repair/update out of scope)")
+        old_path = str(cur.get("path") or "")
+        old_exe = str(cur.get("exe") or "")
+        if old_path and Path(old_path).exists():
+            real = (_gog_dir_parece_juego(Path(old_path))
+                    or (bool(old_exe) and (Path(old_path) / old_exe).is_file()))
+            if real:
+                die(4, f"already installed at {old_path} (repair/update out of scope)")
+            # Registro rancio (carpeta sin juego o exe que no resuelve):
+            # se pisa con el partial nuevo en vez de bloquear la reinstall.
     regs[key] = {"path": path, "exe": "", "status": "partial",
                  "started": int(time.time())}
     _write_installs(regs)
 
 
+def _gog_resolve_installed(entry_path: str) -> Path:
+    """Dir de un juego ya instalado: el path tal cual si parece juego,
+    si no UN nivel de subdirectorios (legacy con doble nesting), si no
+    el path original. Puro salvo IO local."""
+    p = Path(str(entry_path or ""))
+    if _gog_dir_parece_juego(p):
+        return p
+    try:
+        subs = sorted(x for x in p.iterdir() if x.is_dir())
+    except OSError:
+        subs = []
+    for sub in subs:
+        if _gog_dir_parece_juego(sub):
+            return sub
+    return p
+
+
+def cmd_reprobe(args):
+    """Re-probe del exe de un juego instalado: actualiza SOLO 'exe'
+    (relativo, con subcarpetas) en installs.json. Sin --write muestra
+    el cambio (dry-run implícito); con --write respalda installs.json
+    a .bak antes de escribir. Sin exe hallado: error, sin escribir."""
+    import shutil
+    key = f"{args.store}:{args.app_id}"
+    regs = _read_installs()
+    info = regs.get(key)
+    if not isinstance(info, dict) or not info.get("path"):
+        die(2, f"no install record for {key} (install first)")
+    game_dir = _gog_resolve_installed(str(info["path"]))
+    _require_binary(GOGDL_BIN, "gogdl")
+    _ip, exe_probe, _plat = _gog_probe(game_dir, args.app_id)
+    old = str(info.get("exe") or "")
+    old_path = str(info["path"])
+    if not exe_probe:
+        die(3, f"reprobe found no exe under {game_dir}")
+    # El launcher compone path + exe: exe relativo al path que quede
+    # registrado (el actual, o el nuevo con --fix-path).
+    fix = bool(getattr(args, "fix_path", False))
+    new_path = old_path
+    if fix:
+        base = exe_probe if os.path.isabs(exe_probe) else os.path.join(str(game_dir), exe_probe)
+        cand = os.path.dirname(base)
+        if cand and cand != old_path and os.path.isdir(cand) and os.path.isfile(
+                os.path.join(cand, os.path.basename(exe_probe))):
+            new_path = cand
+        elif cand != old_path:
+            die(3, f"reprobe --fix-path: {cand or old_path} missing exe")
+    try:
+        exe = os.path.relpath(os.path.join(str(game_dir), exe_probe), new_path)
+    except ValueError:
+        exe = exe_probe
+    if exe == old and new_path == old_path:
+        emit({"type": "done", "ok": True, "store": args.store,
+              "app_id": args.app_id, "old_exe": old, "new_exe": exe,
+              "wrote": False, "note": "unchanged"})
+        return
+    if not bool(getattr(args, "write", False)):
+        emit({"type": "done", "ok": True, "store": args.store,
+              "app_id": args.app_id, "old_exe": old, "new_exe": exe,
+              "old_path": old_path, "new_path": new_path,
+              "wrote": False, "note": "dry-run; pass --write to apply"})
+        return
+    try:
+        shutil.copy2(INSTALLS_JSON, INSTALLS_JSON.with_suffix(".json.bak"))
+    except OSError as e:
+        die(3, f"could not back up installs.json: {e}")
+    info["exe"] = exe
+    info["path"] = new_path
+    regs[key] = info
+    _write_installs(regs)
+    emit({"type": "done", "ok": True, "store": args.store,
+          "app_id": args.app_id, "old_exe": old, "new_exe": exe,
+          "old_path": old_path, "new_path": new_path,
+          "wrote": True})
+
+
 def cmd_install(args):
     store = args.store
-    dest = Path(args.path or (Path.home() / "Games" / "Heroic")).expanduser()
+    # Sin --path no hay install: el default vive SOLO en el launcher
+    # (default_games_dir por tienda). Ningún literal propio acá.
+    if not (getattr(args, "path", "") or "").strip():
+        die(2, "install needs --path (the launcher always sends it)")
+    dest = Path(args.path).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
     if store == "epic":
         _require_binary(LEGENDARY_BIN, "legendary")
@@ -1480,8 +1805,7 @@ def cmd_install(args):
             for p in entries:
                 if not (p.is_file() and p.suffix.lower() == ".exe"):
                     continue
-                stem = p.stem.lower()
-                if any(s in stem for s in ("unins", "crashhandler", "setup", "redist", "vcredist", "installer")):
+                if _exe_excluded(p.name):
                     continue
                 try:
                     sz = p.stat().st_size
@@ -1504,57 +1828,91 @@ def cmd_install(args):
         if platform == "linux" and not _gog_has_linux_build(info):
             die(6, "no Linux build for this game (Windows-only)")
         lang = _gog_pick_lang(info, getattr(args, "lang", "") or "")
-        dest = _gog_game_dir(dest, args.app_id, info)
+        # --path es la BASE: gogdl anexa <folder_name> solo (pasar la
+        # carpeta duplicaba el nesting: Bloody Hell/Bloody Hell).
+        folder = _sanitize_folder(str(info.get("folder_name") or ""), args.app_id)
+        # Reinstall tras borrado: con manifest guardado, `download` diría
+        # "Nothing to do" sin mirar el disco; `repair` verifica cada
+        # archivo y re-descarga faltantes. Sin manifest, download normal.
+        verb = "download"
+        # repair trabaja IN-PLACE (no anexa carpeta, a diferencia de
+        # download): su --path es el dir esperado del juego.
+        cfg_previo = os.environ.get("GOGDL_CONFIG_PATH")
+        if _gog_manifest_source(args.app_id) == "old" and not _gog_dir_parece_juego(dest / folder):
+            # El manifest vive en el dir compartido legacy: esa invocación
+            # corre con ese config (repair lo exige); no se migra nada.
+            # Se restaura al terminar (también ante die): no contamina
+            # al proceso ni a tests en el mismo intérprete.
+            os.environ["GOGDL_CONFIG_PATH"] = str(
+                _gog_old_manifests_dir().parent.parent)
+            verb = "repair"
+        elif _gog_has_manifest(args.app_id) and not _gog_dir_parece_juego(dest / folder):
+            verb = "repair"
         dl = [GOGDL_BIN, "--auth-config-path", _gogdl_auth_file(),
-              "download", args.app_id, "--path", str(dest),
+              verb, args.app_id, "--path",
+              str(dest / folder) if verb == "repair" else str(dest),
               "--platform", platform]
         if lang:
             dl += ["--lang", lang]
-        _mark_partial(store, args.app_id, str(dest))
+        _mark_partial(store, args.app_id, str(dest / folder))
         try:
             ok = _run_streaming(dl, store, ppid=int(getattr(args, "ppid", 0) or 0))
         except Exception as e:
             die(3, f"gogdl download failed: {type(e).__name__}: {str(e)[:150]}")
+        finally:
+            if cfg_previo is None:
+                os.environ.pop("GOGDL_CONFIG_PATH", None)
+            else:
+                os.environ["GOGDL_CONFIG_PATH"] = cfg_previo
         if not ok:
             die(3, "gogdl download failed (partial kept for resume)")
-        ipath, exe, platform = _gog_probe(dest, args.app_id)
+        game_dir = _gog_find_game_dir(dest, folder)
+        # Puerta de verificación: el dir resuelto NUNCA puede ser la base
+        # compartida (archivos sueltos en la raíz), aunque tenga exe; y
+        # debe parecer juego. Sin eso: die(3), sin escribir registro.
+        if game_dir == dest or not _gog_dir_parece_juego(game_dir):
+            die(3, f"gogdl reported success but {game_dir} has no game files")
+        ipath, exe, platform = _gog_probe(game_dir, args.app_id)
     regs = _read_installs()
     regs[f"{store}:{args.app_id}"] = {"path": ipath, "exe": exe}
     _write_installs(regs)
+    _status_cache_invalidate()
     emit({"type": "done", "ok": True, "store": store, "app_id": args.app_id,
           "install_path": ipath, "executable": exe,
           "requires_wine": platform == "Windows"})
 
 
-def _gog_probe(dest: Path, app_id: str):
-    """Find the installed game dir + exe via `gogdl import`, fallback: biggest exe."""
+def _gog_probe(game_dir: Path, app_id: str):
+    """Exe en un dir ya resuelto: isPrimary > filetask > mayor .exe,
+    todo con las exclusiones compartidas. Nunca toca installs.json."""
     try:
-        proc = subprocess.run([GOGDL_BIN, "import", str(dest)], capture_output=True,
+        proc = subprocess.run([GOGDL_BIN, "import", str(game_dir)], capture_output=True,
                               text=True, timeout=60)
         data = json.loads(proc.stdout or "{}")
         game = data.get("game", {}) if isinstance(data, dict) else {}
         tasks = game.get("playTasks", []) or []
-        for t in tasks:
-            if (t.get("type") or "").lower() == "filetask" and str(t.get("path", "")).lower().endswith(".exe"):
-                return str(dest), t["path"], "Windows"
-        for t in tasks:
-            if str(t.get("path", "")):
-                return str(dest), t["path"], "Linux"
+        picked = _gog_pick_task(tasks)
+        if picked:
+            return str(game_dir), picked, "Windows"
+        for task in tasks:
+            if isinstance(task, dict) and str(task.get("path", "") or ""):
+                return str(game_dir), str(task["path"]), "Linux"
     except (ValueError, subprocess.TimeoutExpired, OSError):
         pass
     best, best_size = "", -1
-    for root, _dirs, files in os.walk(dest):
+    for root, _dirs, files in os.walk(game_dir):
         for f in files:
-            if f.lower().endswith(".exe"):
-                try:
-                    sz = os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    continue
-                if sz > best_size:
-                    best, best_size = os.path.join(root, f), sz
+            if not f.lower().endswith(".exe") or _exe_excluded(f):
+                continue
+            try:
+                sz = os.path.getsize(os.path.join(root, f))
+            except OSError:
+                continue
+            if sz > best_size:
+                best, best_size = os.path.join(root, f), sz
     if best:
-        return str(dest), os.path.relpath(best, dest), "Windows"
-    return str(dest), "", "Linux"
+        return str(game_dir), os.path.relpath(best, game_dir), "Windows"
+    return str(game_dir), "", "Linux"
 
 
 def _stale_cleanup_decision(install_path: str):
@@ -1655,6 +2013,47 @@ def cmd_cleanup_stale(args):
           "cleaned": True})
 
 
+def _gog_uninstall_safe(path: str, regs: dict, self_key: str) -> bool:
+    """Puro salvo IO local: ¿se puede borrar `path` como carpeta del juego?
+    Niega base compartida, padres, no-juegos sin subdir-juego y cualquier
+    solape con otro registro (hermano dentro o path dentro de otro)."""
+    import os as _os
+    try:
+        rp = Path(path).resolve()
+    except OSError:
+        return False
+    if not rp.is_dir():
+        return True  # nada que borrar; el pop del registro sigue
+    home = Path.home()
+    for shared in (Path("/"), home, home / "Games", home / "Games" / "Heroic"):
+        try:
+            if rp == shared.resolve():
+                return False
+        except OSError:
+            if rp == shared:
+                return False
+    try:
+        game_here = _gog_dir_parece_juego(rp) or any(
+            _gog_dir_parece_juego(x) for x in rp.iterdir() if x.is_dir())
+    except OSError:
+        return False
+    if not game_here:
+        return False
+    for key, val in regs.items():
+        if key == self_key or not isinstance(val, dict):
+            continue
+        op = str(val.get("path") or "")
+        if not op:
+            continue
+        try:
+            rop = Path(op).resolve()
+        except OSError:
+            continue
+        if rop == rp or rp in rop.parents or rop in rp.parents:
+            return False
+    return True
+
+
 def cmd_uninstall(args):
     if args.store == "epic":
         _require_binary(LEGENDARY_BIN, "legendary")
@@ -1664,12 +2063,21 @@ def cmd_uninstall(args):
             die(3, f"Uninstall failed: {(proc.stderr or proc.stdout).strip()[-200:]}")
     else:
         regs = _read_installs()
-        info = regs.get(f"gog:{args.app_id}", {})
+        key = f"gog:{args.app_id}"
+        info = regs.get(key, {})
         path = info.get("path", "")
+        kept = False
         if path and Path(path).is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        regs.pop(f"gog:{args.app_id}", None)
+            if _gog_uninstall_safe(path, regs, key):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                kept = True
+        regs.pop(key, None)
         _write_installs(regs)
+        _status_cache_invalidate()
+        if kept:
+            emit({"type": "warning",
+                  "message": f"kept files at {path} (unsafe to delete)"})
     regs = _read_installs()
     regs.pop(f"{args.store}:{args.app_id}", None)
     _write_installs(regs)
@@ -1775,10 +2183,21 @@ def _gog_installed_status():
             continue
         ip = str(info.get("path") or "")
         exe = str(info.get("exe") or "")
-        ok = _verify_path_exe(ip, exe)
+        # GOG: con exe vacío el dir DEBE parecer juego (el registro
+        # {base,""} de una instalación fallida mostraba installed).
+        # Epic no se toca (legendary manda).
+        if exe:
+            ok = _verify_path_exe(ip, exe)
+        else:
+            ok = bool(ip) and _gog_dir_parece_juego(Path(ip))
+        # path que no es DIRECTAMENTE un juego (base compartida, nesting
+        # legacy): Remove-con-archivos sobre esa carpeta es peligroso.
+        # Solo se avisa (flag), no se corrige.
+        misplaced = bool(ip) and not _gog_dir_parece_juego(Path(ip))
         out[app] = {"installed": ok, "stale": not ok,
                     "install_path": ip, "executable": exe,
-                    "partial": info.get("status") == "partial"}
+                    "partial": info.get("status") == "partial",
+                    "misplaced": misplaced}
     return out
 
 
@@ -2473,6 +2892,45 @@ def cmd_login_window(args):
         _dbg("Login window closing with code")
 
 
+def _epic_money_pct(el) -> int:
+    """% REAL de descuento desde discountPrice/originalPrice (minor units
+    con currencyInfo.decimals; fmtPrice es SOLO display, nunca badge).
+    NO usar discountSetting.discountPercentage para el badge: verificado
+    el 2026-09-28 en 11 juegos (LISA, Lamp Clicker, Cozy, Border Police,
+    Motel, Bunny, Island, Monastery, Stunt, Football, Leaves) que
+    discountPercentage + money% == 100 SIEMPRE: el setting es el % QUE
+    PAGAS (d/o*100), no el % OFF. Gratis = 100%; sin rebaja real = 0."""
+    total = (el.get("price") or {}).get("totalPrice") or {}
+    try:
+        info = total.get("currencyInfo") or {}
+        dec = int(info.get("decimals", 2))
+        if dec < 0 or dec > 6:
+            dec = 2
+        f = 10.0 ** dec
+        d = float(total.get("discountPrice") or 0) / f
+        o = float(total.get("originalPrice") or 0) / f
+        if o > 0 and 0 <= d < o:
+            return int(round((1.0 - d / o) * 100))
+    except (ValueError, TypeError):
+        pass
+    return 0
+
+
+def _epic_fmt_end(end_str: str, tz=None) -> str:
+    """endDate ISO (UTC) → 'Oct 9' en hora local del sistema (o tz dada
+    para tests). '' ante fallo. Día-precisión: la zona solo importa en
+    el borde horario."""
+    try:
+        import datetime as _dt
+        end = _dt.datetime.fromisoformat(str(end_str).replace("Z", "+00:00"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=_dt.timezone.utc)
+        loc = end.astimezone(tz) if tz is not None else end.astimezone()
+        return loc.strftime("%b") + f" {loc.day}"
+    except (ValueError, TypeError):
+        return ""
+
+
 def _epic_offer_summary(el, now):
     """(is_active, pct, end_short) for the element's current offer window."""
     import datetime as _dt
@@ -2487,14 +2945,33 @@ def _epic_offer_summary(el, now):
         except (ValueError, TypeError):
             continue
         if start <= now <= end:
-            return True, pct, end.strftime("%m/%d")
+            return True, pct, _epic_fmt_end(str(off.get("endDate", "")))
     return False, -1, ""
 
 
-def _epic_catalog():
+def _epic_country(args) -> str:
+    """País para precios Epic: --country (ISO-2) > región de $LANG
+    (es_EC.UTF-8 → EC) > US. Puro salvo lectura de entorno."""
+    import os as _os
+    import re as _re
+    given = str(getattr(args, "country", "") or "").strip().upper()
+    if _re.fullmatch(r"[A-Z]{2}", given):
+        return given
+    if given:
+        print(f"heroic-store: --country '{given}' inválido, uso LANG",
+              file=sys.stderr)
+    lang = _os.environ.get("LANG", "") or _os.environ.get("LC_ALL", "")
+    m = _re.search(r"_([A-Za-z]{2})(?:[.@]|$)", lang)
+    if m:
+        return m.group(1).upper()
+    return "US"
+
+
+def _epic_catalog(country: str = "US"):
     import urllib.request
     url = ("https://store-site-backend-static.ak.epicgames.com/"
-           "freeGamesPromotions?locale=en-US&country=US&allowCountries=US")
+           "freeGamesPromotions?locale=en-US&country=" + country +
+           "&allowCountries=" + country)
     req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode())
@@ -2561,34 +3038,37 @@ def _epic_price(el):
     return disc, orig, total.get("currencyCode") or ""
 
 
-def _epic_sale_search(count=40, start=0):
+def _epic_sale_search(count=40, start=0, country: str = "US"):
     """One on-sale catalog page via the public store GraphQL (the weekly
     freeGamesPromotions feed only carries ~12 items). Returns (elements,
     catalog_total). The API caps pages at 40."""
     import urllib.request
-    fields = """paging { total }
+    import re as _re
+    if not _re.fullmatch(r"[A-Z]{2}", str(country or "")):
+        country = "US"
+    fields = ("""paging { total }
       elements {
         title description urlSlug productSlug
         catalogNs { mappings { pageSlug pageType } }
         keyImages { type url }
-        price(country: "US") {
+        price(country: "%s") {
           totalPrice { discountPrice originalPrice currencyCode
                        fmtPrice { discountPrice originalPrice } }
         }
         promotions { promotionalOffers { promotionalOffers {
           startDate endDate discountSetting { discountPercentage } } } }
-      }"""
+      }""" % country)
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
                "Content-Type": "application/json", "Accept": "application/json"}
     query = """query {
   Catalog {
-    searchStore(category: "games", count: %d, country: "US", keywords: "",
+    searchStore(category: "games", count: %d, country: "%s", keywords: "",
                 locale: "en-US", onSale: true, sortBy: "relevancy",
                 sortDir: "DESC", start: %d) {
       %s
     }
   }
-}""" % (max(1, min(40, count)), max(0, start), fields)
+}""" % (max(1, min(40, count)), country, max(0, start), fields)
     body = json.dumps({"query": query}).encode()
     req = urllib.request.Request("https://store.epicgames.com/graphql", data=body, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -2597,20 +3077,10 @@ def _epic_sale_search(count=40, start=0):
     return (store.get("elements") or [], (store.get("paging") or {}).get("total") or 0)
 
 
-def _epic_price_pct(el) -> int:
-    try:
-        total = (el.get("price") or {}).get("totalPrice") or {}
-        d, o = float(total.get("discountPrice") or 0), float(total.get("originalPrice") or 0)
-        if o > 0 and d < o:
-            return int(round((1.0 - d / o) * 100))
-    except (ValueError, TypeError):
-        pass
-    return 0
 
-
-def _epic_sale_page(start=0, count=40):
+def _epic_sale_page(start=0, count=40, country: str = "US"):
     """One catalog page + catalog total (UI paginates with --start)."""
-    els, total = _epic_sale_search(count, start)
+    els, total = _epic_sale_search(count, start, country)
     return els, total
 
 
@@ -2621,16 +3091,20 @@ def cmd_epic_deals(args):
     now = _dt.datetime.now(_dt.timezone.utc)
     out, seen, seen_urls = [], set(), set()
     total, fetched = 0, 0
+    country = _epic_country(args)
     if start == 0:
         # Verified promo-window deals first (with end dates).
         # pct >= 100 is a free promo, not a deal (lives in Free games now).
         try:
-            elements = _epic_catalog()
+            elements = _epic_catalog(country)
         except Exception:
             elements = []
         for el in elements:
-            active, pct, end = _epic_offer_summary(el, now)
-            if not active or pct <= 0 or pct >= 100:
+            active, _promo_pct, end = _epic_offer_summary(el, now)
+            if not active:
+                continue
+            pct = _epic_money_pct(el)
+            if pct <= 0 or pct >= 100:
                 continue
             title = el.get("title", "")
             seen.add(title.casefold())
@@ -2644,7 +3118,7 @@ def cmd_epic_deals(args):
                         "store_url": _epic_slug_url(el)})
     # Catalog page (the full on-sale catalog, summer sale & co).
     try:
-        extra, total = _epic_sale_page(start, count)
+        extra, total = _epic_sale_page(start, count, country)
     except Exception as e:
         if start == 0 and not out:
             die(3, f"Could not fetch Epic offers: {e}")
@@ -2653,10 +3127,10 @@ def cmd_epic_deals(args):
         title = el.get("title", "") or ""
         if not title or title.casefold() in seen:
             continue
-        active, pct, end = _epic_offer_summary(el, now)
-        if not active or pct <= 0:
-            pct = _epic_price_pct(el)
+        active, _promo_pct, end = _epic_offer_summary(el, now)
+        if not active:
             end = ""
+        pct = _epic_money_pct(el)
         if pct <= 0 or pct >= 100:
             continue
         url = _epic_slug_url(el)
@@ -2725,11 +3199,14 @@ def cmd_gog_store_search(args):
 # lista. La UI nunca pega a red directo; el rate-limit de precios queda
 # cubierto por construcción. Refresh fuerza con --refresh.
 GOG_RAIL_TTL = 3600
+# Versión del pool de rails: al cambiar topes se invalida el caché viejo
+# sin esperar el TTL (el get rechaza versiones distintas).
+GOG_RAIL_POOL_V = 1
 GOG_RAIL_QUERIES = {
-    # (query, limit a traer, cantidad a mostrar)
-    "sale": ("search/", 30, 12),
-    "new": ("games/new", 12, 12),
-    "free": ("browse/free", 15, 8),
+    # (query, limit a traer, tope del pool; la UI pagina de a 10)
+    "sale": ("search/", 30, 30),
+    "new": ("games/new", 30, 30),
+    "free": ("browse/free", 30, 30),
 }
 
 
@@ -2744,6 +3221,8 @@ def _gog_rail_cache_get(nombre: str):
         data = json.loads((_gog_rail_cache_dir() / f"{nombre}.json").read_text())
         import time as _t
         if _t.time() - float(data.get("ts", 0)) <= float(data.get("ttl", GOG_RAIL_TTL)):
+            if data.get("v", 0) != GOG_RAIL_POOL_V:
+                return None
             items = data.get("items")
             if isinstance(items, list):
                 return items
@@ -2756,7 +3235,8 @@ def _gog_rail_cache_set(nombre: str, items: list) -> None:
     try:
         import time as _t
         (_gog_rail_cache_dir() / f"{nombre}.json").write_text(
-            json.dumps({"ts": _t.time(), "ttl": GOG_RAIL_TTL, "items": items}))
+            json.dumps({"ts": _t.time(), "ttl": GOG_RAIL_TTL,
+                        "v": GOG_RAIL_POOL_V, "items": items}))
     except OSError:
         pass
 
@@ -2808,6 +3288,27 @@ def _gog_rail_item(p: dict) -> dict:
     }
 
 
+def _gog_rail_filter_free(items: list, top: int) -> list:
+    """Puro: de browse/free solo juegos con precio 0 real, sin placeholders
+    ("TEST TEST TEST": palabra repetida) ni DLCs; herramientas gratis y
+    reales (REDkit, ...) al final. Extracción mecánica del inline."""
+    import re as _re
+
+    def _es_basura(title: str) -> bool:
+        bajo = title.strip().lower()
+        return bool(bajo) and _re.search(r"\b(\w+)(\s+\1)+\b", bajo) is not None
+
+    limpios = [x for x in items
+               if x.get("free") and x.get("ptype") == "game"
+               and not _es_basura(x.get("title", ""))]
+    tools = ("redkit", "toolkit", "modkit", "sdk", "editor")
+    juegos = [x for x in limpios
+              if not any(k in x.get("title", "").lower() for k in tools)]
+    herrs = [x for x in limpios
+             if any(k in x.get("title", "").lower() for k in tools)]
+    return (juegos + herrs)[:top]
+
+
 def cmd_gog_rail(args):
     """Rails editoriales de GOG (catálogo público, sin login): sale, new,
     free. Con caché TTL; degradación parcial como el resto de Fase 1."""
@@ -2846,23 +3347,7 @@ def cmd_gog_rail(args):
         # precio lleno con badge 0 %.
         items = [x for x in items if x.get("discount_n", 0.0) > 0][:top]
     elif nombre == "free":
-        # browse/free trae pagado, DLCs y placeholders ("TEST TEST TEST"):
-        # solo juegos con precio 0 real. El filtro de placeholder es mínimo
-        # a propósito (palabra repetida): sin arquitectura de curaduría.
-        # Las herramientas gratis y reales (REDkit, ...) van al final.
-        import re as _re
-        def _es_basura(t: str) -> bool:
-            bajo = t.strip().lower()
-            return bool(bajo) and _re.search(r"\b(\w+)(\s+\1)+\b", bajo) is not None
-        limpios = [x for x in items
-                   if x.get("free") and x.get("ptype") == "game"
-                   and not _es_basura(x.get("title", ""))]
-        tools = ("redkit", "toolkit", "modkit", "sdk", "editor")
-        juegos = [x for x in limpios
-                  if not any(k in x.get("title", "").lower() for k in tools)]
-        herrs = [x for x in limpios
-                 if any(k in x.get("title", "").lower() for k in tools)]
-        items = (juegos + herrs)[:top]
+        items = _gog_rail_filter_free(items, top)
     else:
         items = items[:top]
     for x in items:
@@ -2973,8 +3458,10 @@ def cmd_umu_setup(_args):
 def cmd_free_promos(_args):
     try:
         import urllib.request
+        country = _epic_country(_args)
         url = ("https://store-site-backend-static.ak.epicgames.com/"
-               "freeGamesPromotions?locale=en-US&country=US&allowCountries=US")
+               "freeGamesPromotions?locale=en-US&country=" + country +
+               "&allowCountries=" + country)
         req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
@@ -3037,7 +3524,8 @@ def main():
     p_rl.add_argument("--lang", default="spanish")
     p_rl.add_argument("--ppid", type=int, default=0)
     p_rl.add_argument("--refresh", action="store_true")
-    sub.add_parser("free-promos")
+    p_promos = sub.add_parser("free-promos")
+    p_promos.add_argument("--country", default="")
     p_gss = sub.add_parser("gog-store-search")
     p_gss.add_argument("--query", default="")
     p_gss.add_argument("--limit", type=int, default=10)
@@ -3051,6 +3539,11 @@ def main():
     p_ins.add_argument("--lang", default="")
     p_ins.add_argument("--platform", choices=["windows", "linux"], default="windows")
     p_ins.add_argument("--ppid", type=int, default=0)
+    p_rp = sub.add_parser("reprobe")
+    p_rp.add_argument("--store", choices=["gog"], required=True)
+    p_rp.add_argument("--app-id", required=True)
+    p_rp.add_argument("--write", action="store_true")
+    p_rp.add_argument("--fix-path", action="store_true")
     p_un = sub.add_parser("uninstall")
     p_un.add_argument("--store", choices=["epic", "gog"], required=True)
     p_un.add_argument("--app-id", required=True)
@@ -3078,6 +3571,7 @@ def main():
     p_deals = sub.add_parser("epic-deals")
     p_deals.add_argument("--start", type=int, default=0)
     p_deals.add_argument("--count", type=int, default=40)
+    p_deals.add_argument("--country", default="")
     args = parser.parse_args()
     dispatch = {
         "status": cmd_status,
@@ -3093,6 +3587,7 @@ def main():
         "gog-store-search": cmd_gog_store_search,
         "gog-rail": cmd_gog_rail,
         "install": cmd_install,
+        "reprobe": cmd_reprobe,
         "uninstall": cmd_uninstall,
         "cleanup-stale": cmd_cleanup_stale,
         "launch-info": cmd_launch_info,
