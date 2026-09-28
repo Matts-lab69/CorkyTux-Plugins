@@ -1,11 +1,11 @@
-"""Tests sin red del wrapper rpgmaker-runtime (fase 2.2).
+"""No-network tests for the rpgmaker-runtime wrapper.
 
-Cubre deteccion local (hint UI), parseo de runtimes, deteccion X11 y el
-reenvio de flags de `run`, sin invocar box-rpg real ni tocar disco del
-usuario. El camino con backend real se verifica en vivo (ver
+I cover local detection (UI hint), runtime parsing, X11 detection and the
+flag forwarding of `run`, without invoking a real box-rpg and without
+touching the user disk. I verify the real-backend path live (see
 docs/rpgmaker-upgrade.md).
 
-Uso: python3 tests/test_rpgmaker.py (stdlib, sin red).
+Run: python3 tests/test_rpgmaker.py (stdlib, no network).
 """
 import importlib.machinery
 import importlib.util
@@ -78,7 +78,7 @@ class DetectHint(unittest.TestCase):
 
 
 class ApiRuntime(unittest.TestCase):
-    """Versiones/listas vía box.api estructurado (sin parsear texto CLI)."""
+    """Versions/lists via the structured box.api (no CLI text parsing)."""
 
     @classmethod
     def setUpClass(cls):
@@ -142,7 +142,7 @@ class NeedsX11(unittest.TestCase):
 
 
 class RunForwarding(unittest.TestCase):
-    """run reenvia opt-ins y pide --x11 en X11 (sin lanzar nada real)."""
+    """run forwards the opt-ins and demands --x11 on X11 (launching nothing real)."""
 
     @classmethod
     def setUpClass(cls):
@@ -193,7 +193,7 @@ class RunForwarding(unittest.TestCase):
 
 
 class AvailableParsing(unittest.TestCase):
-    """Formato upstream 26.9.138: '  1. v0.117.0 (195.7 MB)'."""
+    """Upstream 26.9.138 format: '  1. v0.117.0 (195.7 MB)'."""
 
     @classmethod
     def setUpClass(cls):
@@ -219,7 +219,7 @@ class AvailableParsing(unittest.TestCase):
 
 
 class SessionCommands(unittest.TestCase):
-    """sessions/stop/runtime-remove/config-show (box hijo mockeado)."""
+    """sessions/stop/runtime-remove/config-show (child box mocked)."""
 
     @classmethod
     def setUpClass(cls):

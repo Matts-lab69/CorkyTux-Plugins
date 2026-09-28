@@ -2114,8 +2114,8 @@ def cmd_mod_update(args):
     dest = target_dir / primary["filename"]
     emit({"type": "progress", "stage": f"updating-{primary['filename']}",
           "percent": 0})
-    # Descarga a temporal + reemplazo atómico: si falla, el jar anterior
-    # queda intacto (incluso cuando dest == old, update in-place).
+    # I download to a temp file and atomically replace, so a failed
+    # download leaves the previous jar intact (even for in-place updates).
     tmp = target_dir / (primary["filename"] + ".corky-part")
     try:
         _download_with_progress(primary["url"], tmp, "downloading")

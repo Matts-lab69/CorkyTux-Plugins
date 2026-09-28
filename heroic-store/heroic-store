@@ -20,10 +20,10 @@ import webbrowser
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "CorkyTux" / "plugins" / "heroic-store"
-# gogdl en su propio CONFIG_DIR (manifests incluidos): no reutilizar las
-# carpetas de Heroic (~/.config/heroic_gogdl) para no colisionar si el
-# usuario también usa Heroic. Solo afecta a gogdl hijo (auth va por
-# --auth-config-path explícito, ya separada).
+# I keep gogdl in my own CONFIG_DIR (manifests included): I never reuse
+# Heroic's folders (~/.config/heroic_gogdl) so I don't collide when I also
+# have Heroic installed. This only affects the gogdl child process (auth
+# goes through an explicit --auth-config-path, already kept separate).
 os.environ.setdefault("GOGDL_CONFIG_PATH", str(CONFIG_DIR / "gogdl"))
 # Shared Steam API minimum gap, enforced across plugin processes via a
 # timestamp file (the launcher can run a library refresh and modal
@@ -151,8 +151,9 @@ def _read_json(path: Path):
         return None
     except ValueError:
         pass
-    # Archivo a medio escribir por gogdl (rota el token y reescribe el
-    # fichero entero): reintenta antes de declararlo ilegible.
+    # I retry here because gogdl can leave a half-written file (it rotates
+    # the token by rewriting the whole file) — I don't call it unreadable
+    # until a retry fails too.
     for _ in range(2):
         time.sleep(0.1)
         try:
@@ -163,8 +164,9 @@ def _read_json(path: Path):
 
 
 def _atomic_write_json(path: Path, payload: str, mode: int = 0) -> None:
-    """Escritura atómica (tmp + rename). Con mode != 0 el tmp nace ya con
-    esos permisos (tokens: nada legible por otros ni por un instante)."""
+    """I write atomically (tmp + rename). With mode != 0 I create the tmp
+    file with those permissions from the start (tokens must never be
+    readable by others, not even briefly)."""
     tmp = path.with_name(path.name + ".tmp")
     if mode:
         fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, mode)
@@ -211,14 +213,16 @@ def _gogdl_auth_file() -> str:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:
         if not GOGDL_AUTH_JSON.exists():
-            # O_EXCL: si aparece entre el exists() y el open(), no se pisa.
+            # I use O_EXCL so a file appearing between exists() and open()
+            # is never clobbered.
             fd = os.open(GOGDL_AUTH_JSON, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             try:
                 os.write(fd, b"{}")
             finally:
                 os.close(fd)
         elif GOGDL_AUTH_JSON.stat().st_size == 0:
-            # Un intento anterior dejo el archivo vacio. gogdl no lo tolera.
+            # I repair this because an earlier attempt left an empty file,
+            # which gogdl cannot tolerate.
             GOGDL_AUTH_JSON.write_text("{}")
         os.chmod(GOGDL_AUTH_JSON, 0o600)
     except OSError:
@@ -248,10 +252,10 @@ def _gogdl_store_entry(entry: dict, refresh_used: str = "") -> None:
     data = _read_json(GOGDL_AUTH_JSON)
     if not isinstance(data, dict):
         data = {}
-    # Compare-and-swap: si gogdl rotó desde nuestra lectura, su entrada es
-    # la válida y la nuestra (derivada del token viejo) está muerta: no
-    # escribir. cur ausente o sin refresh_token (None/"") NO es rotación:
-    # se escribe igual.
+    # I compare-and-swap here: if gogdl rotated since I read, its entry
+    # is the valid one and mine (derived from the old token) is dead, so
+    # I don't write. A missing cur or one without refresh_token is NOT a
+    # rotation — then I still write.
     cur = data.get(GOG_CLIENT_ID)
     cur_rt = cur.get("refresh_token") if isinstance(cur, dict) else None
     if cur_rt not in (None, "", refresh_used):
@@ -295,9 +299,9 @@ STATUS_CACHE = CONFIG_DIR / ".status_cache.json"
 
 
 def _status_cache_invalidate() -> bool:
-    """Borra el caché de `status` (bins/sesión). Las demás cachés
-    (rails TTL, descriptions con prune en refresh) no cambian con
-    install/uninstall: se invalidan por su propia vía."""
+    """I clear the `status` cache (bins/session) here. My other caches
+    (rails TTL, descriptions with prune on refresh) don't change on
+    install/uninstall — I invalidate those through their own path."""
     try:
         STATUS_CACHE.unlink()
         return True
@@ -326,8 +330,9 @@ def _status_cache_set(payload):
 
 
 def cmd_bins(_args):
-    """Solo presencia de binarios, sin red: para el pre-chequeo liviano del
-    modal de dependencias. Misma condición que `cmd_status`, sin sesión."""
+    """I only report binary presence here, no network: I use this for the
+    lightweight dependency-modal precheck. I apply the same condition as
+    `cmd_status`, without any session."""
     epic_bin = Path(LEGENDARY_BIN).exists() or shutil.which("legendary") is not None
     gog_bin = Path(GOGDL_BIN).exists() or shutil.which("gogdl") is not None
     emit({"type": "done", "ok": True,
@@ -1013,7 +1018,7 @@ def cmd_game_info(args):
     access = _gog_access_token()
     if not access:
         die(4, "GOG not logged in.")
-    # Presupuesto total de red para game-info: 6 s (5 s por llamada).
+    # I give game-info 6 s of network budget total (5 s per call).
     t0 = time.monotonic()
     budget = lambda: max(0.01, min(5.0, 6.0 - (time.monotonic() - t0)))
     try:
@@ -1024,7 +1029,7 @@ def cmd_game_info(args):
         with urllib.request.urlopen(req, timeout=budget()) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        # Degradación: ficha vacía marcada parcial en vez de matar la vista.
+        # I degrade instead of killing the view: empty sheet flagged partial.
         emit({"type": "done", "ok": True, "store": "gog",
               "info": {"app_id": args.app_id, "title": "", "version": "",
                        "cover": "", "description": ""},
@@ -1042,19 +1047,19 @@ def cmd_game_info(args):
     saved = _descriptions_load().get(key)
     saved = saved if isinstance(saved, dict) else {}
     if not desc.strip() and saved.get("description"):
-        # 1) caché propia (guardado único, como Epic).
+        # 1) my own cache (single save, same as Epic).
         desc = str(saved.get("description") or "")
         desc_source = str(saved.get("source") or "")
     vert = str(saved.get("cover") or "")
     if vert and saved.get("cover_src") not in (None, "", "v2-box"):
-        # Entrada legacy con cover no vertical: reintentar v2; se
-        # reemplaza solo si llega un vertical real.
+        # Legacy entry with a non-vertical cover: I retry v2 and only
+        # replace it when a real vertical actually arrives.
         vert = ""
     fresh_vert = ""
     if not desc.strip() or not vert:
-        # 2) un solo fetch v2 sirve banner+desc, con presupuesto; se
-        # salta si ya se resolvió. Cadena: vertical v2 → bg con
-        # extensión → .jpg → "" (el modal cae al tile).
+        # 2) one v2 fetch covers banner+desc, still on budget, and I
+        # skip it when both already resolved. Chain: v2 vertical →
+        # bg with extension → .jpg → "" (the modal falls back to the tile).
         v2_box, v2_desc = _gog_v2_game(args.app_id, timeout=budget())
         if not desc.strip() and v2_desc:
             desc, desc_source = v2_desc, "gog"
@@ -1062,8 +1067,8 @@ def cmd_game_info(args):
             fresh_vert = v2_box
             vert = fresh_vert
         cover = _gog_modal_cover(vert, bg, "")
-        # 4) guardado único: solo datos nuevos reales, nunca fallos. El
-        # wipe de Refresh borra la entrada entera (cover_src incluido).
+        # 4) single save: only real new data, never failures. The Refresh
+        # wipe drops the whole entry (cover_src included).
         merged = _gog_merge_entry(saved, desc, desc_source, fresh_vert, "v2-box")
         if merged is not None:
             _descriptions_save(key, merged)
@@ -1078,8 +1083,8 @@ def cmd_game_info(args):
 
 
 def _gog_modal_cover(vert: str, bg: str, pub_bg: str) -> str:
-    """Pura: coverVertical → background con extensión → público → .jpg → "".
-    "" deja que el modal use el cover del tile (fallback del launcher)."""
+    """Pure: coverVertical → background with extension → public → .jpg → "".
+    "" lets the modal use the tile cover (the launcher's fallback)."""
     if vert:
         return vert
     if bg and bg.lower().endswith(IMG_EXTS):
@@ -1093,8 +1098,8 @@ def _gog_modal_cover(vert: str, bg: str, pub_bg: str) -> str:
 
 def _gog_merge_entry(saved: dict, desc: str, desc_source: str,
                      fresh_vert: str, vert_src: str = ""):
-    """Pura: entrada a guardar (una sola vez) o None si no hay nada nuevo.
-    Nunca guarda fallos (""/"") ni reescribe lo ya guardado."""
+    """Pure: the entry to save (once) or None when nothing is new.
+    I never save failures (""/"") nor rewrite what is already stored."""
     saved = saved if isinstance(saved, dict) else {}
     entry = dict(saved)
     changed = False
@@ -1117,14 +1122,14 @@ def _gog_merge_entry(saved: dict, desc: str, desc_source: str,
 
 
 def _gog_v2_game(app_id: str, timeout: float = 5):
-    """(boxart_vertical, description) desde api.gog.com/v2/games/<id>.
-    Un solo fetch sirve banner y descripción (description es string con
-    HTML: se limpia igual que v1). ("","") ante fallo o 404, sin
-    excepciones hacia la UI.
-    Backup documentado (NO implementado): gamesdb
+    """(boxart_vertical, description) from api.gog.com/v2/games/<id>.
+    One fetch serves banner and description (description is a string with
+    HTML: I strip it the same way v1 does). ("","") on failure or 404, no
+    exceptions leaking toward the UI.
+    Documented backup (NOT implemented): gamesdb
     platforms/gog/external_releases/<id> → game.vertical_cover.url_format
-    con formatter _glx_vertical_cover (verificado 342×482 en 1831618557
-    y 1542190742). Solo si v2 muere."""
+    with the _glx_vertical_cover formatter (verified 342×482 on 1831618557
+    and 1542190742). Only if v2 dies."""
     if timeout <= 0:
         return "", ""
     try:
@@ -1154,13 +1159,13 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 
 def _gog_desc_wipe(data: dict) -> dict:
-    """Puro: Refresh explícito — borra TODAS las claves gog:, conserva
-    el resto (Epic y demás). Re-resuelven al abrir cada ficha."""
+    """Pure: explicit Refresh — I drop EVERY gog: key and keep the rest
+    (Epic and friends). They re-resolve when each sheet opens again."""
     return {k: v for k, v in data.items() if not k.startswith("gog:")}
 
 
 def _gog_desc_prune(data: dict, vivas: set) -> dict:
-    """Puro: cargas normales — solo poda gog: de juegos ausentes."""
+    """Pure: normal loads — I only prune gog: keys of missing games."""
     return {k: v for k, v in data.items()
             if not (k.startswith("gog:") and k not in vivas)}
 
@@ -1222,9 +1227,9 @@ def cmd_library(args):
     games = []
     page = 1
     advertencia = ""
-    # Degradación por página/producto: una página o un producto roto no mata
-    # la lista entera; se emite lo que haya con partial:true. Solo la falta
-    # de sesión (arriba) sigue siendo un error duro.
+    # I degrade per page/product: one broken page or product never kills
+    # the whole list, I emit whatever arrived with partial:true. Only a
+    # missing session (above) stays a hard error.
     try:
         while True:
             try:
@@ -1246,9 +1251,9 @@ def cmd_library(args):
                     app_id = str(p.get("id", ""))
                     st = status.get(app_id, {})
                     verified = st.get("installed", False)
-                    # worksOn existe pero Lutris documenta que viene roto
-                    # (todo-falso): solo se publican los true, nunca se
-                    # inventa sistema. Vacío = la UI oculta esa mitad.
+                    # worksOn exists but Lutris documents it as broken
+                    # (all-false): I only publish the true ones and never
+                    # invent a system. Empty = the UI hides that half.
                     systems = sorted(
                         k for k, v in (p.get("worksOn") or {}).items() if v
                     ) if isinstance(p.get("worksOn"), dict) else []
@@ -1271,9 +1276,9 @@ def cmd_library(args):
             page += 1
     except Exception as e:
         advertencia = f"unexpected: {e}"
-    # descriptions.json (claves gog:, nunca Epic): Refresh explícito
-    # (--refresh) invalida todo y re-resuelve; cargas normales solo
-    # podan ausentes. Solo con lista completa y no vacía.
+    # descriptions.json (gog: keys, never Epic): an explicit Refresh
+    # (--refresh) invalidates everything and re-resolves; normal loads
+    # only prune what is absent. Only with a complete, non-empty list.
     if not advertencia and games:
         vivas = {"gog:" + str(g.get("app_id", "")) for g in games if g.get("app_id")}
         if vivas:
@@ -1417,10 +1422,11 @@ _GOG_SPEED_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*MiB/s\s*\(raw\)")
 
 
 def _parse_progress_line(line: str):
-    """Línea de log gogdl/legendary → dict de evento o None si no es progreso.
-    Pura (sin IO): la cubren los tests sin red. NOTA: written_raw/total_raw
-    son contadores sin unidad confirmada (NO afirmar bytes hasta captura
-    real); percent y eta_s sí son seguros por construcción."""
+    """One gogdl/legendary log line → event dict, or None when it is not
+    progress. Pure (no IO): the tests cover it without network. NOTE:
+    written_raw/total_raw are counters with no unit confirmed (I do NOT
+    claim bytes until a real capture); percent and eta_s are safe by
+    construction."""
     m = _GOG_PROGRESS_RE.search(line)
     if m:
         eta = None
@@ -1451,9 +1457,9 @@ def _run_streaming(cmd, store, ppid=0):
     prev_term = signal.getsignal(signal.SIGTERM)
 
     def _on_term(_signo, _frame):
-        # Cancelación del launcher: terminar gogdl antes de salir
-        # (terminate, 2 s de gracia, kill). El marker partial queda y
-        # permite reanudar.
+        # Launcher cancellation: I finish gogdl before exiting
+        # (terminate, 2 s grace, kill). The partial marker stays so
+        # the download can be resumed.
         try:
             proc.terminate()
             try:
@@ -1474,9 +1480,9 @@ def _run_streaming(cmd, store, ppid=0):
     pending = None
     try:
         for line in proc.stdout:
-            # Self-exit si el launcher murió. LIMITACIÓN explícita: solo
-            # corre al llegar una línea; un gogdl colgado sin salida no lo
-            # dispara (lo cubre el watchdog/kill del launcher en el paso d).
+            # Self-exit when the launcher died. EXPLICIT LIMIT: it only
+            # runs when a line arrives, so a gogdl stuck with no output
+            # never triggers it (the launcher's watchdog/kill covers that).
             if ppid:
                 try:
                     if os.getppid() != ppid:
@@ -1493,12 +1499,12 @@ def _run_streaming(cmd, store, ppid=0):
                 ev = {"stage": line[:120], "percent": None}
             elif ev.get("speed_mibs") is not None and ev.get("percent") is None:
                 speed = ev["speed_mibs"]
-                continue  # velocidad sola: se adjunta al próximo Progress
+                continue  # speed alone: I attach it to the next Progress
             else:
                 if ev.get("percent") is not None and speed is not None:
                     ev["speed_mibs"] = speed
             ev["store"] = store
-            # Throttle ~2/s: siempre el primero y el último (pending).
+            # Throttle ~2/s: I always keep the first and the last (pending).
             now = time.monotonic()
             if first or now - last_emit >= 0.5:
                 if pending is not None:
@@ -1538,8 +1544,8 @@ _AUTH_ERR_RE = re.compile(
 
 
 def _gog_info_raw(app_id: str, platform: str):
-    """(info_dict, stderr). {} ante cualquier fallo: el llamador degrada
-    (sin --lang) o muere con mensaje accionable (auth → re-login)."""
+    """(info_dict, stderr). {} on any failure: the caller degrades
+    (without --lang) or dies with an actionable message (auth → re-login)."""
     try:
         proc = subprocess.run(
             [GOGDL_BIN, "--auth-config-path", _gogdl_auth_file(),
@@ -1557,7 +1563,7 @@ def _gog_info_raw(app_id: str, platform: str):
 
 
 def _gog_pick_lang(info: dict, override: str) -> str:
-    """en-US si está en languages, si no el primero, si no "". Pura."""
+    """en-US when it is in languages, else the first one, else "". Pure."""
     if override:
         return override
     langs = [str(x) for x in (info.get("languages") or []) if str(x)]
@@ -1567,9 +1573,9 @@ def _gog_pick_lang(info: dict, override: str) -> str:
 
 
 def _gog_has_linux_build(info: dict) -> bool:
-    """Pura: ¿builds[].os del info (windows) incluye linux? NUNCA invoca a
-    `info --platform linux`: ese manager crashea con traceback si no hay
-    build nativo."""
+    """Pure: does builds[].os from the (windows) info include linux? I NEVER
+    call `info --platform linux`: that manager crashes with a traceback
+    when there is no native build."""
     try:
         items = (info.get("builds") or {}).get("items", []) or []
     except AttributeError:
@@ -1584,19 +1590,19 @@ def _sanitize_folder(name: str, fallback: str) -> str:
     return keep or fallback
 
 
-# Una sola lista de exclusiones para Epic y GOG (instaladores, helpers,
-# crash-handlers: nunca son el juego).
+# I keep one single exclusion list for Epic and GOG (installers, helpers,
+# crash-handlers: they are never the game).
 _EXE_IGNORE = ("unins", "crashhandler", "setup", "redist", "vcredist", "installer")
 
 
 def _exe_excluded(filename: str) -> bool:
-    """Puro: ¿el nombre huele a instalador/helper?"""
+    """Pure: does the name smell like an installer/helper?"""
     return any(s in Path(filename).stem.lower() for s in _EXE_IGNORE)
 
 
 def _gog_pick_task(tasks: list) -> str:
-    """Puro: isPrimary .exe (no excluido) > primer filetask .exe (no
-    excluido) > "". gogdl marca isPrimary en el import."""
+    """Pure: isPrimary .exe (not excluded) > first filetask .exe (not
+    excluded) > "". gogdl marks isPrimary on import."""
     cands = []
     for task in tasks or []:
         if not isinstance(task, dict):
@@ -1614,7 +1620,7 @@ def _gog_pick_task(tasks: list) -> str:
 
 
 def _gog_dir_parece_juego(d: Path) -> bool:
-    """Puro salvo IO local: goggame-*.info o algún .exe directo."""
+    """Pure except local IO: goggame-*.info or some direct .exe."""
     try:
         if d.is_dir():
             names = [p.name for p in d.iterdir()]
@@ -1626,7 +1632,7 @@ def _gog_dir_parece_juego(d: Path) -> bool:
 
 
 def _gogdl_manifests_dir() -> Path:
-    """Espeja gogdl/constants.py (CONFIG_DIR + override GOGDL_CONFIG_PATH)."""
+    """Mirrors gogdl/constants.py (CONFIG_DIR + GOGDL_CONFIG_PATH override)."""
     import os as _os
     base = _os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     cfg = _os.environ.get("GOGDL_CONFIG_PATH")
@@ -1635,15 +1641,15 @@ def _gogdl_manifests_dir() -> Path:
 
 
 def _gog_old_manifests_dir() -> Path:
-    """Dir compartido legacy (~/.config/heroic_gogdl): SOLO lectura,
-    nunca se escribe ni se migra nada ahí."""
+    """Legacy shared dir (~/.config/heroic_gogdl): READ ONLY, I never
+    write there and never migrate anything out of it."""
     import os as _os
     base = _os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base, "heroic_gogdl") / "manifests"
 
 
 def _gog_manifest_source(app_id: str) -> str:
-    """'new' | 'old' | ''. Dónde está el manifest (nuevo primero)."""
+    """'new' | 'old' | ''. Where the manifest lives (new one first)."""
     try:
         if (_gogdl_manifests_dir() / str(app_id)).is_file():
             return "new"
@@ -1655,15 +1661,16 @@ def _gog_manifest_source(app_id: str) -> str:
 
 
 def _gog_has_manifest(app_id: str) -> bool:
-    """Puro salvo IO local: ¿hay manifest (nuevo o viejo)?"""
+    """Pure except local IO: is there a manifest (new or old)?"""
     return _gog_manifest_source(app_id) != ""
 
 
 def _gog_find_game_dir(base: Path, folder: str) -> Path:
-    """Tras `download --path <base>`, gogdl crea <base>/<folder>. Se usa
-    si parece juego; si no, se prueba UN nivel de subdirectorios (cubre
-    instalaciones legacy con doble nesting); si no, base (nunca se
-    pierde la instalación). Acota el walk del probe al juego."""
+    """After `download --path <base>`, gogdl creates <base>/<folder>. I use
+    it when it looks like a game; otherwise I try ONE level of
+    subdirectories (that covers legacy installs with double nesting);
+    otherwise the base, so the install is never lost. I keep the probe
+    walk scoped to the game."""
     cand = base / folder
     if _gog_dir_parece_juego(cand):
         return cand
@@ -1678,9 +1685,9 @@ def _gog_find_game_dir(base: Path, folder: str) -> Path:
 
 
 def _mark_partial(store: str, app_id: str, path: str) -> None:
-    """Marca partial ANTES de descargar (permite Reanudar). Si ya hay una
-    entrada completa con carpeta presente → error claro (repair/update
-    fuera de alcance); registro huérfano (carpeta ausente) se pisa."""
+    """I mark partial BEFORE downloading (so Resume works). If there is
+    already a complete entry whose folder exists → clear error (repair/
+    update is out of scope); an orphan record (folder gone) gets overwritten."""
     regs = _read_installs()
     key = f"{store}:{app_id}"
     cur = regs.get(key)
@@ -1692,17 +1699,18 @@ def _mark_partial(store: str, app_id: str, path: str) -> None:
                     or (bool(old_exe) and (Path(old_path) / old_exe).is_file()))
             if real:
                 die(4, f"already installed at {old_path} (repair/update out of scope)")
-            # Registro rancio (carpeta sin juego o exe que no resuelve):
-            # se pisa con el partial nuevo en vez de bloquear la reinstall.
+            # Stale record (folder without a game, or an exe that does
+            # not resolve): I overwrite it with the new partial instead
+            # of blocking the reinstall.
     regs[key] = {"path": path, "exe": "", "status": "partial",
                  "started": int(time.time())}
     _write_installs(regs)
 
 
 def _gog_resolve_installed(entry_path: str) -> Path:
-    """Dir de un juego ya instalado: el path tal cual si parece juego,
-    si no UN nivel de subdirectorios (legacy con doble nesting), si no
-    el path original. Puro salvo IO local."""
+    """Dir of an already installed game: the path as-is when it looks
+    like a game, else ONE level of subdirectories (legacy double
+    nesting), else the original path. Pure except local IO."""
     p = Path(str(entry_path or ""))
     if _gog_dir_parece_juego(p):
         return p
@@ -1717,10 +1725,10 @@ def _gog_resolve_installed(entry_path: str) -> Path:
 
 
 def cmd_reprobe(args):
-    """Re-probe del exe de un juego instalado: actualiza SOLO 'exe'
-    (relativo, con subcarpetas) en installs.json. Sin --write muestra
-    el cambio (dry-run implícito); con --write respalda installs.json
-    a .bak antes de escribir. Sin exe hallado: error, sin escribir."""
+    """I re-probe the exe of an installed game: only 'exe' is updated
+    (relative, subfolders included) in installs.json. Without --write I
+    just show the change (implicit dry-run); with --write I back up
+    installs.json to .bak before writing. No exe found: error, no write."""
     import shutil
     key = f"{args.store}:{args.app_id}"
     regs = _read_installs()
@@ -1734,8 +1742,8 @@ def cmd_reprobe(args):
     old_path = str(info["path"])
     if not exe_probe:
         die(3, f"reprobe found no exe under {game_dir}")
-    # El launcher compone path + exe: exe relativo al path que quede
-    # registrado (el actual, o el nuevo con --fix-path).
+    # The launcher composes path + exe: exe is relative to whichever
+    # path ends up registered (the current one, or the new one with --fix-path).
     fix = bool(getattr(args, "fix_path", False))
     new_path = old_path
     if fix:
@@ -1786,8 +1794,8 @@ def cmd_reprobe(args):
 
 def cmd_install(args):
     store = args.store
-    # Sin --path no hay install: el default vive SOLO en el launcher
-    # (default_games_dir por tienda). Ningún literal propio acá.
+    # Without --path there is no install: the default lives ONLY in the
+    # launcher (default_games_dir per store). I keep no default of my own here.
     if not (getattr(args, "path", "") or "").strip():
         die(2, "install needs --path (the launcher always sends it)")
     dest = Path(args.path).expanduser()
@@ -1837,21 +1845,23 @@ def cmd_install(args):
         if platform == "linux" and not _gog_has_linux_build(info):
             die(6, "no Linux build for this game (Windows-only)")
         lang = _gog_pick_lang(info, getattr(args, "lang", "") or "")
-        # --path es la BASE: gogdl anexa <folder_name> solo (pasar la
-        # carpeta duplicaba el nesting: Bloody Hell/Bloody Hell).
+        # --path is the BASE: gogdl appends <folder_name> on its own
+        # (passing the folder itself duplicated the nesting:
+        # Bloody Hell/Bloody Hell).
         folder = _sanitize_folder(str(info.get("folder_name") or ""), args.app_id)
-        # Reinstall tras borrado: con manifest guardado, `download` diría
-        # "Nothing to do" sin mirar el disco; `repair` verifica cada
-        # archivo y re-descarga faltantes. Sin manifest, download normal.
+        # Reinstall after a deletion: with a manifest stored, `download`
+        # would say "Nothing to do" without looking at the disk; `repair`
+        # verifies every file and re-downloads the missing ones. Without
+        # a manifest, plain download.
         verb = "download"
-        # repair trabaja IN-PLACE (no anexa carpeta, a diferencia de
-        # download): su --path es el dir esperado del juego.
+        # repair works IN-PLACE (it does not append a folder, unlike
+        # download): its --path is the game's expected dir.
         cfg_previo = os.environ.get("GOGDL_CONFIG_PATH")
         if _gog_manifest_source(args.app_id) == "old" and not _gog_dir_parece_juego(dest / folder):
-            # El manifest vive en el dir compartido legacy: esa invocación
-            # corre con ese config (repair lo exige); no se migra nada.
-            # Se restaura al terminar (también ante die): no contamina
-            # al proceso ni a tests en el mismo intérprete.
+            # The manifest lives in the legacy shared dir: that call runs
+            # with that config (repair requires it) and nothing is migrated.
+            # I restore it when done (and on die too), so it never leaks
+            # into the process or into tests sharing the interpreter.
             os.environ["GOGDL_CONFIG_PATH"] = str(
                 _gog_old_manifests_dir().parent.parent)
             verb = "repair"
@@ -1876,9 +1886,9 @@ def cmd_install(args):
         if not ok:
             die(3, "gogdl download failed (partial kept for resume)")
         game_dir = _gog_find_game_dir(dest, folder)
-        # Puerta de verificación: el dir resuelto NUNCA puede ser la base
-        # compartida (archivos sueltos en la raíz), aunque tenga exe; y
-        # debe parecer juego. Sin eso: die(3), sin escribir registro.
+        # Verification gate: the resolved dir must NEVER be the shared
+        # base (loose files in the root), even if it has an exe, and it
+        # must look like a game. Otherwise: die(3), no record written.
         if game_dir == dest or not _gog_dir_parece_juego(game_dir):
             die(3, f"gogdl reported success but {game_dir} has no game files")
         ipath, exe, platform = _gog_probe(game_dir, args.app_id)
@@ -1892,8 +1902,8 @@ def cmd_install(args):
 
 
 def _gog_probe(game_dir: Path, app_id: str):
-    """Exe en un dir ya resuelto: isPrimary > filetask > mayor .exe,
-    todo con las exclusiones compartidas. Nunca toca installs.json."""
+    """Exe in an already resolved dir: isPrimary > filetask > biggest .exe,
+    all of them with the shared exclusions. I never touch installs.json."""
     try:
         proc = subprocess.run([GOGDL_BIN, "import", str(game_dir)], capture_output=True,
                               text=True, timeout=60)
@@ -2023,16 +2033,17 @@ def cmd_cleanup_stale(args):
 
 
 def _gog_uninstall_safe(path: str, regs: dict, self_key: str) -> bool:
-    """Puro salvo IO local: ¿se puede borrar `path` como carpeta del juego?
-    Niega base compartida, padres, no-juegos sin subdir-juego y cualquier
-    solape con otro registro (hermano dentro o path dentro de otro)."""
+    """Pure except local IO: can I delete `path` as the game's folder?
+    I refuse shared bases, parents, non-games with no game subdir, and
+    any overlap with another record (a sibling inside it, or this path
+    inside another)."""
     import os as _os
     try:
         rp = Path(path).resolve()
     except OSError:
         return False
     if not rp.is_dir():
-        return True  # nada que borrar; el pop del registro sigue
+        return True  # nothing to delete; the record pop still happens
     home = Path.home()
     for shared in (Path("/"), home, home / "Games", home / "Games" / "Heroic"):
         try:
@@ -2192,16 +2203,16 @@ def _gog_installed_status():
             continue
         ip = str(info.get("path") or "")
         exe = str(info.get("exe") or "")
-        # GOG: con exe vacío el dir DEBE parecer juego (el registro
-        # {base,""} de una instalación fallida mostraba installed).
-        # Epic no se toca (legendary manda).
+        # GOG: with an empty exe the dir MUST look like a game (the
+        # {base,""} record of a failed install used to show as installed).
+        # I leave Epic alone (legendary owns that).
         if exe:
             ok = _verify_path_exe(ip, exe)
         else:
             ok = bool(ip) and _gog_dir_parece_juego(Path(ip))
-        # path que no es DIRECTAMENTE un juego (base compartida, nesting
-        # legacy): Remove-con-archivos sobre esa carpeta es peligroso.
-        # Solo se avisa (flag), no se corrige.
+        # a path that is not DIRECTLY a game (shared base, legacy
+        # nesting): Remove-with-files on that folder is dangerous.
+        # I only warn (flag); I never fix it here.
         misplaced = bool(ip) and not _gog_dir_parece_juego(Path(ip))
         out[app] = {"installed": ok, "stale": not ok,
                     "install_path": ip, "executable": exe,
@@ -2586,7 +2597,7 @@ def cmd_login_window(args):
     col.set_margin_bottom(6)
     col.set_margin_start(6)
     col.set_margin_end(6)
-    # ── Sesión de red persistente + reCAPTCHA-friendly (WebKitGTK 6.0) ─────
+    # ── Persistent network session + reCAPTCHA-friendly (WebKitGTK 6.0) ──
     # GOG's login page embeds Google reCAPTCHA (recaptcha.net) in a
     # cross-origin iframe and its SSO providers live under
     # external-accounts.gog.com. WebKitGTK blocks third-party cookies by
@@ -2784,12 +2795,13 @@ def cmd_login_window(args):
     except Exception as e:
         _dbg(f"web-process-terminated not available: {e}")
 
-    # ─── Instrumentación (WebKit-6.0.gir verificado) ───
-    # console-message NO existe como señal en 6.0 (solo la propiedad
-    # enable-write-console-messages-to-stdout) y resource-load-finished
-    # tampoco: se usa load-failed (28550) + resource-load-started (28793),
-    # monitorizando cada recurso con sus señales propias finished/failed +
-    # get_response()/get_status_code(). URIs siempre vía _sani_uri.
+    # ─── Instrumentation (WebKit-6.0.gir verified) ───
+    # console-message does NOT exist as a signal in 6.0 (only the
+    # enable-write-console-messages-to-stdout property) and neither does
+    # resource-load-finished: I use load-failed (28550) +
+    # resource-load-started (28793), watching every resource with its own
+    # finished/failed signals + get_response()/get_status_code().
+    # URIs always go through _sani_uri.
     WATCH_HOSTS = ("gog.com", "recaptcha.net", "gstatic.com",
                    "external-accounts.gog.com")
 
@@ -2902,13 +2914,14 @@ def cmd_login_window(args):
 
 
 def _epic_money_pct(el) -> int:
-    """% REAL de descuento desde discountPrice/originalPrice (minor units
-    con currencyInfo.decimals; fmtPrice es SOLO display, nunca badge).
-    NO usar discountSetting.discountPercentage para el badge: verificado
-    el 2026-09-28 en 11 juegos (LISA, Lamp Clicker, Cozy, Border Police,
-    Motel, Bunny, Island, Monastery, Stunt, Football, Leaves) que
-    discountPercentage + money% == 100 SIEMPRE: el setting es el % QUE
-    PAGAS (d/o*100), no el % OFF. Gratis = 100%; sin rebaja real = 0."""
+    """REAL discount % from discountPrice/originalPrice (minor units
+    with currencyInfo.decimals; fmtPrice is DISPLAY only, never a badge).
+    I do NOT use discountSetting.discountPercentage for the badge: I
+    verified on 2026-09-28 across 11 games (LISA, Lamp Clicker, Cozy,
+    Border Police, Motel, Bunny, Island, Monastery, Stunt, Football,
+    Leaves) that discountPercentage + money% == 100 ALWAYS: that setting
+    is the % YOU PAY (d/o*100), not the % OFF. Free = 100%; no real cut
+    = 0."""
     total = (el.get("price") or {}).get("totalPrice") or {}
     try:
         info = total.get("currencyInfo") or {}
@@ -2926,9 +2939,9 @@ def _epic_money_pct(el) -> int:
 
 
 def _epic_fmt_end(end_str: str, tz=None) -> str:
-    """endDate ISO (UTC) → 'Oct 9' en hora local del sistema (o tz dada
-    para tests). '' ante fallo. Día-precisión: la zona solo importa en
-    el borde horario."""
+    """endDate ISO (UTC) → 'Oct 9' in the system local time (or the tz I
+    am given, for tests). '' on failure. Day precision: the zone only
+    matters at the day boundary."""
     try:
         import datetime as _dt
         end = _dt.datetime.fromisoformat(str(end_str).replace("Z", "+00:00"))
@@ -2959,15 +2972,15 @@ def _epic_offer_summary(el, now):
 
 
 def _epic_country(args) -> str:
-    """País para precios Epic: --country (ISO-2) > región de $LANG
-    (es_EC.UTF-8 → EC) > US. Puro salvo lectura de entorno."""
+    """Country for Epic pricing: --country (ISO-2) > $LANG region
+    (es_EC.UTF-8 → EC) > US. Pure except for the env read."""
     import os as _os
     import re as _re
     given = str(getattr(args, "country", "") or "").strip().upper()
     if _re.fullmatch(r"[A-Z]{2}", given):
         return given
     if given:
-        print(f"heroic-store: --country '{given}' inválido, uso LANG",
+        print(f"heroic-store: invalid --country '{given}', using LANG",
               file=sys.stderr)
     lang = _os.environ.get("LANG", "") or _os.environ.get("LC_ALL", "")
     m = _re.search(r"_([A-Za-z]{2})(?:[.@]|$)", lang)
@@ -3178,7 +3191,7 @@ def cmd_gog_store_search(args):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
-        # Degradación: lista vacía marcada parcial en vez de matar la vista.
+        # I degrade instead of killing the view: empty list flagged partial.
         emit({"type": "done", "ok": True, "store": "gog", "results": [],
               "partial": True, "warning": f"store search failed: {e}"})
         return
@@ -3204,15 +3217,15 @@ def cmd_gog_store_search(args):
           "partial": bool(advertencia), "warning": advertencia})
 
 
-# Caché en disco de los rails editoriales (públicos, sin login): TTL 1 h por
-# lista. La UI nunca pega a red directo; el rate-limit de precios queda
-# cubierto por construcción. Refresh fuerza con --refresh.
+# On-disk cache for the editorial rails (public, no login): TTL 1 h per
+# list. The UI never hits the network directly, so the price rate-limit
+# is covered by construction. Refresh forces with --refresh.
 GOG_RAIL_TTL = 3600
-# Versión del pool de rails: al cambiar topes se invalida el caché viejo
-# sin esperar el TTL (el get rechaza versiones distintas).
+# Rail pool version: when the caps change I invalidate the old cache
+# without waiting out the TTL (the get rejects a different version).
 GOG_RAIL_POOL_V = 1
 GOG_RAIL_QUERIES = {
-    # (query, limit a traer, tope del pool; la UI pagina de a 10)
+    # (query, limit to fetch, pool cap; the UI pages 10 at a time)
     "sale": ("search/", 30, 30),
     "new": ("games/new", 30, 30),
     "free": ("browse/free", 30, 30),
@@ -3251,7 +3264,7 @@ def _gog_rail_cache_set(nombre: str, items: list) -> None:
 
 
 def _gog_rail_fetch(query: str, limit: int):
-    """Una página del catálogo público. Devuelve la lista cruda o lanza."""
+    """One page of the public catalog. I return the raw list or raise."""
     import urllib.request
     import urllib.parse
     url = ("https://catalog.gog.com/v1/catalog?query="
@@ -3264,7 +3277,7 @@ def _gog_rail_fetch(query: str, limit: int):
 
 
 def _gog_rail_item(p: dict) -> dict:
-    """Normaliza un producto del catálogo al schema de tarjeta de rail."""
+    """I normalize one catalog product into the rail card schema."""
     price = p.get("price") or {}
     money = price.get("finalMoney") or {}
     try:
@@ -3298,9 +3311,10 @@ def _gog_rail_item(p: dict) -> dict:
 
 
 def _gog_rail_filter_free(items: list, top: int) -> list:
-    """Puro: de browse/free solo juegos con precio 0 real, sin placeholders
-    ("TEST TEST TEST": palabra repetida) ni DLCs; herramientas gratis y
-    reales (REDkit, ...) al final. Extracción mecánica del inline."""
+    """Pure: from browse/free I keep only games with a real 0 price, no
+    placeholders ("TEST TEST TEST": a repeated word) and no DLCs; real
+    free tools (REDkit, ...) go last. I lifted this mechanically out of
+    the inline version."""
     import re as _re
 
     def _es_basura(title: str) -> bool:
@@ -3319,8 +3333,8 @@ def _gog_rail_filter_free(items: list, top: int) -> list:
 
 
 def cmd_gog_rail(args):
-    """Rails editoriales de GOG (catálogo público, sin login): sale, new,
-    free. Con caché TTL; degradación parcial como el resto de Fase 1."""
+    """GOG editorial rails (public catalog, no login): sale, new, free.
+    I keep the TTL cache and degrade partially like everywhere else."""
     nombre = (args.list or "").strip()
     if nombre not in GOG_RAIL_QUERIES:
         die(2, f"unknown rail: {nombre} (sale|new|free)")
@@ -3348,12 +3362,12 @@ def cmd_gog_rail(args):
             items.append(_gog_rail_item(p))
         except Exception:
             mal += 1
-    # On Sale se ordena acá (el API no ordena por descuento): top por %.
-    # New/free conservan el orden del API.
+    # I sort On Sale here (the API does not order by discount): top by %.
+    # New/free keep the API order.
     if nombre == "sale":
         items.sort(key=lambda x: x.get("discount_n", 0.0), reverse=True)
-        # Sin descuento real no es "sale": se filtra para no mostrar
-        # precio lleno con badge 0 %.
+        # Without a real discount it is not a "sale": I filter it out so
+        # I never show a full price with a 0 % badge.
         items = [x for x in items if x.get("discount_n", 0.0) > 0][:top]
     elif nombre == "free":
         items = _gog_rail_filter_free(items, top)

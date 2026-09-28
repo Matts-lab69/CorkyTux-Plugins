@@ -1,11 +1,11 @@
-"""Tests sin red del paso (a): parseo de progreso gogdl, lang, builds, carpetas.
+"""No-network tests: gogdl progress parsing, lang, builds, folders.
 
-NOTA: las líneas de progreso son SINTÉTICAS (derivadas de los format
-strings de gogdl/dl/progressbar.py, NO capturadas de una descarga real).
-En la prueba real con Hank se capturan líneas verdaderas y se agregan
-como fixtures. written_raw/total_raw son contadores SIN unidad confirmada.
+NOTE: the progress lines are SYNTHETIC (derived from gogdl's own format
+strings in dl/progressbar.py, NOT captured from a real download). When I
+run the real thing with Hank I capture real lines and add them here as
+fixtures. written_raw/total_raw are counters with NO unit confirmed.
 
-Uso: python3 tests/test_gog_install.py (stdlib, sin pytest ni red).
+Run: python3 tests/test_gog_install.py (stdlib, no pytest, no network).
 """
 import importlib.machinery
 import importlib.util
@@ -17,7 +17,7 @@ SCRIPT = Path(__file__).resolve().parent.parent / "heroic-store"
 
 
 def load():
-    # El plugin no tiene extensión .py: SourceFileLoader explícito.
+    # The plugin has no .py extension: I load it with an explicit SourceFileLoader.
     loader = importlib.machinery.SourceFileLoader("heroic_store", str(SCRIPT))
     spec = importlib.util.spec_from_loader("heroic_store", loader)
     mod = importlib.util.module_from_spec(spec)
@@ -116,7 +116,7 @@ class SanitizeFolder(unittest.TestCase):
 
 
 class GogRailPools(unittest.TestCase):
-    """Constantes de pool y filtro Free (sin red)."""
+    """Pool constants and the Free filter (no network)."""
 
     @classmethod
     def setUpClass(cls):
@@ -147,7 +147,7 @@ class GogRailPools(unittest.TestCase):
 
 
 class GogModalCover(unittest.TestCase):
-    """Cadena vertical → bg con ext → público → .jpg → vacío."""
+    """Chain: vertical → bg with ext → public → .jpg → empty."""
 
     @classmethod
     def setUpClass(cls):
@@ -178,7 +178,7 @@ class GogModalCover(unittest.TestCase):
 
 
 class GogMergeEntry(unittest.TestCase):
-    """Guardado único: solo datos nuevos, nunca fallos."""
+    """Single save: only new data, never failures."""
 
     @classmethod
     def setUpClass(cls):
@@ -203,7 +203,7 @@ class GogMergeEntry(unittest.TestCase):
 
 
 class GogDescKeys(unittest.TestCase):
-    """Wipe total (refresh) vs poda de ausentes (cargas)."""
+    """Total wipe (refresh) vs pruning the absent ones (loads)."""
 
     @classmethod
     def setUpClass(cls):
@@ -222,7 +222,7 @@ class GogDescKeys(unittest.TestCase):
 
 
 class GogV2Game(unittest.TestCase):
-    """Un solo fetch v2: boxArt+desc, sin boxArt, red, JSON, 404."""
+    """One v2 fetch: boxArt+desc, no boxArt, network, JSON, 404."""
 
     @classmethod
     def setUpClass(cls):
@@ -269,7 +269,7 @@ class GogV2Game(unittest.TestCase):
 
 
 class GogMergeCoverSrc(unittest.TestCase):
-    """cover_src v2-box y migración de entradas legacy."""
+    """cover_src v2-box and the migration of legacy entries."""
 
     @classmethod
     def setUpClass(cls):
@@ -289,7 +289,7 @@ class GogMergeCoverSrc(unittest.TestCase):
 
 
 class EpicDealsMoney(unittest.TestCase):
-    """Badge desde el dinero: promo 80 + 799/999 → 20."""
+    """Badge from the money: promo 80 + 799/999 → 20."""
 
     @classmethod
     def setUpClass(cls):
@@ -310,7 +310,7 @@ class EpicDealsMoney(unittest.TestCase):
         self.assertEqual(self.m._epic_money_pct(self._el(799, 999)), 20)
 
     def test_fmtprice_ignorado_para_badge(self):
-        # fmtPrice es solo display: sin números no hay badge.
+        # fmtPrice is display only: with no numbers there is no badge.
         el = self._el(0, 0, fmt=("$3.19", "$3.99"))
         self.assertEqual(self.m._epic_money_pct(el), 0)
 
@@ -334,7 +334,7 @@ class EpicDealsMoney(unittest.TestCase):
             self.m._epic_fmt_end("2026-10-09T15:00:00.000Z", tz), "Oct 9")
 
     def test_ends_frontera_utc(self):
-        # 02:00 UTC del 9 = 21:00 del 8 en -05: la zona decide el día.
+        # 02:00 UTC on the 9 = 21:00 on the 8 at -05: the zone decides the day.
         import datetime
         tz = datetime.timezone(datetime.timedelta(hours=-5))
         self.assertEqual(
@@ -352,7 +352,7 @@ class EpicDealsMoney(unittest.TestCase):
 
 
 class EpicCountry(unittest.TestCase):
-    """País Epic: --country > $LANG > US."""
+    """Epic country: --country > $LANG > US."""
 
     @classmethod
     def setUpClass(cls):
@@ -409,8 +409,8 @@ class EpicCountry(unittest.TestCase):
 
 
 class EpicFreePromosE2E(unittest.TestCase):
-    """cmd_free_promos punta a punta con red simulada (el NameError
-    anterior pasaba con tests en verde porque nada lo ejecutaba)."""
+    """cmd_free_promos end to end with a simulated network (the earlier
+    NameError slipped through with green tests because nothing ran it)."""
 
     @classmethod
     def setUpClass(cls):
@@ -445,7 +445,7 @@ class EpicFreePromosE2E(unittest.TestCase):
         self.assertEqual(done[0]["free_now"][0]["title"], "Gratis Ahora")
 
     def test_promos_sin_url_country(self):
-        # Sin NameError aunque country venga vacío (usa LANG/US).
+        # No NameError even when country arrives empty (it uses LANG/US).
         import types
         from unittest import mock
         seen = {}
@@ -464,7 +464,7 @@ class EpicFreePromosE2E(unittest.TestCase):
 
 
 class EpicDealsE2E(unittest.TestCase):
-    """cmd_epic_deals punta a punta: feed + página GraphQL simulados."""
+    """cmd_epic_deals end to end: feed + simulated GraphQL page."""
 
     @classmethod
     def setUpClass(cls):
@@ -511,7 +511,7 @@ class EpicDealsE2E(unittest.TestCase):
 
 
 class GogProbeExe(unittest.TestCase):
-    """isPrimary > filetask > mayor .exe, todo con exclusiones."""
+    """isPrimary > filetask > biggest .exe, all with the exclusions."""
 
     @classmethod
     def setUpClass(cls):
@@ -576,7 +576,7 @@ class GogProbeExe(unittest.TestCase):
 
 
 class GogInstallE2E(unittest.TestCase):
-    """Flujo install GOG con red simulada: --path = base, sin nesting."""
+    """GOG install flow with a simulated network: --path = base, no nesting."""
 
     @classmethod
     def setUpClass(cls):
@@ -620,7 +620,7 @@ class GogInstallE2E(unittest.TestCase):
 
 
 class GogReprobe(unittest.TestCase):
-    """reprobe: dry-run no escribe, --write solo toca exe (+ .bak)."""
+    """reprobe: dry-run writes nothing, --write only touches exe (+ .bak)."""
 
     @classmethod
     def setUpClass(cls):
@@ -769,7 +769,7 @@ class GogReprobe(unittest.TestCase):
 
 
 class GogInstallGate(unittest.TestCase):
-    """Puerta post-download + repair ante manifest, sin red ni disco real."""
+    """Post-download gate + repair with a manifest, no network, no real disk."""
 
     @classmethod
     def setUpClass(cls):
@@ -818,7 +818,7 @@ class GogInstallGate(unittest.TestCase):
             self.assertEqual(rec["gog:99"]["status"], "partial")
 
     def test_manifest_presente_elige_repair(self):
-        # Dir borrado + manifest guardado (tu caso): repair verifica disco.
+        # Deleted dir + stored manifest (the common case): repair checks disk.
         import shutil
         import tempfile
         from unittest import mock
@@ -843,8 +843,8 @@ class GogInstallGate(unittest.TestCase):
                                       return_value=(str(base / "Juego"),
                                                     "Juego.exe", "Windows")), \
                     mock.patch.object(self.m, "emit", events.append):
-                # La puerta muere (nada escrito: el dir sigue vacío), pero
-                # el verbo ya quedó decidido antes.
+                # The gate dies (nothing written: the dir is still empty),
+                # but the verb was already decided before that.
                 with self.assertRaises(SystemExit):
                     self.m.cmd_install(self._ns(str(base)))
             self.assertEqual(seen["verb"], "repair")
@@ -889,7 +889,7 @@ class GogInstallGate(unittest.TestCase):
 
 
 class GogReinstallRobusto(unittest.TestCase):
-    """Reinstall tras borrado: nada de éxito vacío ni bloqueos rancios."""
+    """Reinstall after a deletion: no empty success, no stale blocks."""
 
     @classmethod
     def setUpClass(cls):
@@ -959,7 +959,7 @@ class GogReinstallRobusto(unittest.TestCase):
 
 
 class GogRepairPath(unittest.TestCase):
-    """Cada verbo con su --path; base con exe sueltos también muere."""
+    """Each verb with its own --path; a base with loose exes dies too."""
 
     @classmethod
     def setUpClass(cls):
@@ -992,8 +992,8 @@ class GogRepairPath(unittest.TestCase):
         return fake
 
     def test_repair_path_es_carpeta(self):
-        # Dir borrado + manifest: repair IN-PLACE (dir esperado), la
-        # puerta muere después porque nada escribió (simulado).
+        # Deleted dir + manifest: repair IN-PLACE (the expected dir), and
+        # the gate dies afterwards because nothing wrote (simulated).
         import tempfile
         from unittest import mock
         with tempfile.TemporaryDirectory() as tmp:
@@ -1049,7 +1049,7 @@ class GogRepairPath(unittest.TestCase):
 
 
 class StatusCacheInvalidate(unittest.TestCase):
-    """Invalidación pura del caché de status tras install/uninstall."""
+    """Pure invalidation of the status cache after install/uninstall."""
 
     @classmethod
     def setUpClass(cls):
@@ -1077,7 +1077,7 @@ class StatusCacheInvalidate(unittest.TestCase):
 
 
 class GogInstallPath(unittest.TestCase):
-    """Sin --path: error. Con --path: ese valor exacto."""
+    """Without --path: error. With --path: that exact value."""
 
     @classmethod
     def setUpClass(cls):
@@ -1125,7 +1125,7 @@ class GogInstallPath(unittest.TestCase):
                     mock.patch.object(self.m, "emit", events.append):
                 self.m.cmd_install(self._ns(str(base)))
             idx = seen["cmd"].index("--path")
-            # download (sin manifest en tmp): --path es la base tal cual.
+            # download (no manifest in tmp): --path is the base as-is.
             self.assertEqual(seen["cmd"][idx + 1], str(base))
             done = [e for e in events if e.get("type") == "done"][0]
             self.assertEqual(done["install_path"], str(base / "Juego"))
