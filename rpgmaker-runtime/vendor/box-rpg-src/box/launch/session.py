@@ -34,6 +34,7 @@ class LaunchSession:
     game_descriptor: int
     profile_root: Path
     owns_game_descriptor: bool
+    detached: bool = False
 
     @property
     def reference(self) -> Path:
@@ -41,9 +42,28 @@ class LaunchSession:
         return self.root
 
     @property
+    def identifier(self) -> str:
+        """Return the per-game directory name owning this session."""
+        return self.root.parent.name
+
+    @property
     def process_descriptors(self) -> tuple[int, ...]:
         """Return descriptors retained by the launcher while its session is active."""
         return ()
+
+    def detach(self) -> None:
+        """Transfer lifetime to the detached supervisor; skip removal on exit."""
+        self.detached = True
+
+    def release(self) -> None:
+        """Close launcher descriptors without removing the supervised directory."""
+        with suppress(OSError):
+            os.close(self.session_descriptor)
+        with suppress(OSError):
+            os.close(self.parent_descriptor)
+        if self.owns_game_descriptor:
+            with suppress(OSError):
+                os.close(self.game_descriptor)
 
     def cleanup(self) -> None:
         """Remove this session directory."""
@@ -71,6 +91,9 @@ class LaunchSession:
         traceback: TracebackType | None,
     ) -> None:
         """Clean the session even when launching fails."""
+        if self.detached:
+            self.release()
+            return
         self.cleanup()
 
 
@@ -80,6 +103,7 @@ def create_session(
     copy_root_files: tuple[str, ...] = (),
     *,
     game_descriptor: int | None = None,
+    game_root: Path | None = None,
 ) -> LaunchSession:
     """Create an isolated manifest and game link under the XDG cache."""
     paths.ensure()
@@ -93,8 +117,10 @@ def create_session(
             os.close(game_descriptor)
         raise
     try:
-        identifier = _game_identifier(game)
-        profile_root = ProfileCatalog(paths).create_for_game(game, game_reference_path)
+        identifier = _game_identifier(game, game_root)
+        profile_root = ProfileCatalog(paths).create_for_game(
+            game, game_reference_path if game_root is None else game_root
+        )
     except Exception:
         if owns_game_descriptor:
             os.close(game_descriptor)
@@ -183,13 +209,14 @@ def create_session(
     )
 
 
-def _game_identifier(game: GameInfo) -> str:
+def _game_identifier(game: GameInfo, game_root: Path | None = None) -> str:
     """Convert a missing or racing game path into a launch-domain error."""
     try:
-        return game_id(game.root)
+        return game_id(game.root if game_root is None else game_root)
     except (OSError, RuntimeError) as exc:
+        root = game.root if game_root is None else game_root
         raise LaunchError(
-            _("cannot identify game root {root}: {error}").format(root=game.root, error=exc)
+            _("cannot identify game root {root}: {error}").format(root=root, error=exc)
         ) from exc
 
 

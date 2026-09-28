@@ -6,6 +6,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
+from box.api.runtime import default_architecture
 from box.cli import cleanup as cleanup_command
 from box.cli import config as config_command
 from box.cli import diagnose as diagnose_command
@@ -19,7 +20,7 @@ from box.errors import BoxError, GameValidationError
 from box.games.detector import detect_game
 from box.paths import AppPaths
 from box.runtime.catalog import RuntimeCatalog
-from box.runtime.platform import current_architecture, normalize_architecture
+from box.runtime.platform import normalize_architecture
 from box.utils.i18n import _, configure
 from box.utils.terminal import safe_terminal_text
 
@@ -50,18 +51,23 @@ def main(argv: list[str] | None = None) -> int:
             allow_network=False,
             allow_game_writes=False,
             x11=False,
+            gamemode=False,
+            ci_mount=False,
         )
     try:
         return _dispatch(arguments)
     except (BoxError, ValueError) as exc:
-        print(f"{_('error')}: {safe_terminal_text(exc)}", file=sys.stderr)
+        error_label = _("error")
+        print(f"{error_label}: {safe_terminal_text(exc)}", file=sys.stderr)
         return 1
 
 
 def _dispatch(arguments: Namespace) -> int:
     """Dispatch one parsed subcommand to its isolated implementation module."""
     if arguments.command == "inspect":
-        return inspect_command.execute(Path(arguments.game))
+        # No ensure(): plain inspection must not create launcher directories;
+        # packed sources create their profile cache on demand during unpack.
+        return inspect_command.execute(AppPaths.from_environment(), Path(arguments.game))
     paths = AppPaths.from_environment()
     paths.ensure()
     repository = ConfigRepository(paths)
@@ -83,7 +89,7 @@ def _dispatch(arguments: Namespace) -> int:
         catalog = RuntimeCatalog(paths)
         if arguments.nwjs_command == "list":
             return runtime_command.list_runtimes(catalog)
-        architecture = normalize_architecture(arguments.architecture or current_architecture())
+        architecture = normalize_architecture(arguments.architecture or default_architecture())
         if arguments.nwjs_command == "available":
             return runtime_command.available(
                 paths,
@@ -106,6 +112,8 @@ def _dispatch(arguments: Namespace) -> int:
             allow_network=arguments.allow_network,
             allow_game_writes=arguments.allow_game_writes,
             x11=arguments.x11,
+            gamemode=getattr(arguments, "gamemode", False),
+            ci_mount=getattr(arguments, "ci_mount", False),
         )
     if arguments.command == "config":
         if arguments.config_command == "show":

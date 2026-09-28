@@ -3,118 +3,20 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
+from box.api.cleanup import CATEGORIES, CleanupCatalog, CleanupItem, RemovalResult
 from box.cli.menu import choose_paged
 from box.config.repository import ConfigRepository
 from box.errors import BoxError, RuntimeError
-from box.launch.profiles import ProfileCatalog
 from box.paths import AppPaths
-from box.runtime.catalog import ManagedRuntime, RuntimeCatalog
-from box.runtime.downloads import DownloadCatalog
-from box.runtime.easyrpg import EasyRPGCatalog, EasyRPGDownloadCatalog, EasyRPGRuntime
+from box.runtime.catalog import ManagedRuntime
+from box.runtime.easyrpg import EasyRPGRuntime
 from box.utils.i18n import _, ngettext
-
-CATEGORIES = ("roots", "runtimes", "downloads", "profiles")
-
-
-@dataclass(frozen=True, slots=True)
-class CleanupItem:
-    """One safely enumerated item available for cleanup."""
-
-    category: str
-    selector: str
-    label: str
-    value: Path | ManagedRuntime | EasyRPGRuntime
-    provider: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RemovalResult:
-    """The outcome of a batch of independently safe removal operations."""
-
-    removed: int
-    failed: int
-
-
-class CleanupCatalog:
-    """List and delete only data known to the launcher-managed catalogs."""
-
-    def __init__(self, paths: AppPaths, repository: ConfigRepository) -> None:
-        self._repository = repository
-        self._runtimes = RuntimeCatalog(paths)
-        self._easyrpg_runtimes = EasyRPGCatalog(paths)
-        self._downloads = DownloadCatalog(paths)
-        self._easyrpg_downloads = EasyRPGDownloadCatalog(paths)
-        self._profiles = ProfileCatalog(paths)
-
-    def list(self, category: str | None = None) -> tuple[CleanupItem, ...]:
-        """Return canonical cleanup items for one category or every category."""
-        if category is not None and category not in CATEGORIES:
-            raise RuntimeError(_("unknown cleanup category: {category}").format(category=category))
-        items: list[CleanupItem] = []
-        if category in {None, "roots"}:
-            items.extend(
-                CleanupItem("roots", str(root), str(root), root)
-                for root in self._repository.load().allowed_game_roots
-            )
-        if category in {None, "runtimes"}:
-            items.extend(
-                CleanupItem(
-                    "runtimes",
-                    _runtime_selector(runtime),
-                    _render_runtime(runtime),
-                    runtime,
-                )
-                for runtime in (
-                    *self._runtimes.list_managed(),
-                    *self._easyrpg_runtimes.list_managed(),
-                )
-            )
-        if category in {None, "downloads"}:
-            items.extend(
-                CleanupItem("downloads", f"nwjs:{archive.name}", archive.name, archive, "nwjs")
-                for archive in self._downloads.list()
-            )
-            items.extend(
-                CleanupItem(
-                    "downloads", f"easyrpg:{archive.name}", archive.name, archive, "easyrpg"
-                )
-                for archive in self._easyrpg_downloads.list()
-            )
-        if category in {None, "profiles"}:
-            items.extend(
-                CleanupItem("profiles", profile.name, profile.name, profile)
-                for profile in self._profiles.list()
-            )
-        return tuple(items)
-
-    def remove(self, item: CleanupItem) -> None:
-        """Remove one previously listed item through its owning catalog."""
-        if item.category == "roots":
-            assert isinstance(item.value, Path)
-            self._repository.remove_allowed_root(item.value)
-        elif item.category == "runtimes":
-            if isinstance(item.value, EasyRPGRuntime):
-                self._easyrpg_runtimes.remove_managed(item.value)
-            else:
-                assert isinstance(item.value, ManagedRuntime)
-                self._runtimes.remove_managed(item.value)
-        elif item.category == "downloads":
-            assert isinstance(item.value, Path)
-            if item.provider == "easyrpg":
-                self._easyrpg_downloads.remove(item.value)
-            else:
-                self._downloads.remove(item.value)
-        elif item.category == "profiles":
-            assert isinstance(item.value, Path)
-            self._profiles.remove(item.value)
-        else:
-            raise RuntimeError(
-                _("unknown cleanup category: {category}").format(category=item.category)
-            )
+from box.utils.sizes import directory_size, file_size, format_size_decimal
+from box.utils.terminal import abbreviate_prompt_path, safe_terminal_text
 
 
 def execute(
@@ -261,6 +163,40 @@ def _interactive_cleanup(
         write(_("Invalid selection."))
 
 
+def _render_cleanup_item(item: CleanupItem, size_str: str | None = None) -> str:
+    """Render one cleanup item for the interactive menu without altering stored data."""
+    if item.category == "roots":
+        assert isinstance(item.value, Path)
+        available = max(shutil.get_terminal_size().columns - len("  10. "), 1)
+        return safe_terminal_text(abbreviate_prompt_path(item.value, available, Path.home()))
+    if size_str is not None:
+        return f"{item.label} ({size_str})"
+    return item.label
+
+
+def _item_path(item: CleanupItem) -> Path | None:
+    """Resolve the filesystem path measured for an item, or None for roots."""
+    if item.category in ("downloads", "profiles"):
+        return item.value if isinstance(item.value, Path) else None
+    if item.category == "runtimes":
+        if isinstance(item.value, (ManagedRuntime, EasyRPGRuntime)):
+            return item.value.root
+        return None
+    return None
+
+
+def _item_size(item: CleanupItem) -> int | None:
+    """Return the on-disk size for an item, or None when unknown."""
+    path = _item_path(item)
+    if path is None:
+        return None
+    if path.is_symlink():
+        return file_size(path)
+    if path.is_dir():
+        return directory_size(path)
+    return file_size(path)
+
+
 def _interactive_choose(
     catalog: CleanupCatalog,
     category: str,
@@ -268,10 +204,17 @@ def _interactive_choose(
     write: Callable[[str], None],
 ) -> None:
     items = catalog.list(category)
+    sizes: dict[str, int | None] = {item.selector: _item_size(item) for item in items}
+
+    def render(item: CleanupItem) -> str:
+        raw_size = sizes.get(item.selector)
+        size_str = format_size_decimal(raw_size) if raw_size is not None else None
+        return _render_cleanup_item(item, size_str)
+
     selection = choose_paged(
         _category_title(category),
         items,
-        lambda item: item.label,
+        render,
         allow_all=True,
         read=read,
         write=write,
@@ -361,19 +304,6 @@ def _confirm(
     except EOFError:
         write(_("Cleanup cancelled."))
         return False
-
-
-def _runtime_selector(runtime: ManagedRuntime | EasyRPGRuntime) -> str:
-    if isinstance(runtime, EasyRPGRuntime):
-        return f"easyrpg:{runtime.version}"
-    return f"nwjs:{runtime.spec.architecture}:{runtime.spec.directory_name}"
-
-
-def _render_runtime(runtime: ManagedRuntime | EasyRPGRuntime) -> str:
-    if isinstance(runtime, EasyRPGRuntime):
-        return f"EasyRPG Player {runtime.version} x64"
-    flavor = "SDK" if runtime.spec.sdk else _("standard")
-    return f"NW.js {runtime.spec.version} {runtime.spec.architecture} {flavor}"
 
 
 def _category_title(category: str) -> str:

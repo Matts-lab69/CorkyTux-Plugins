@@ -11,6 +11,7 @@ from types import TracebackType
 
 from box.errors import LaunchError
 from box.games.files import validate_game_descriptor
+from box.launch.gamemode import GAMEMODE_PROXY_SOCKET_NAME
 from box.launch.profiles import ProfileCatalog
 from box.models import EngineName, GameInfo
 from box.paths import AppPaths, open_directory_without_symlinks
@@ -456,9 +457,35 @@ class Sandbox:
             self.bind(cookie_descriptor, "/home/sandbox/.pulse-cookie")
             self.options += ["--setenv", "PULSE_COOKIE", "/home/sandbox/.pulse-cookie"]
 
-    def persistence(self, paths: AppPaths, game: GameInfo) -> None:
+    def gamemode(self, proxy_host_path: Path) -> None:
+        """Expose only the filtered GameMode proxy socket, never the host bus.
+
+        Binds the supervisor-created socket at ``proxy_host_path`` read-only to
+        ``/run/user/gamemode-proxy`` and points ``DBUS_SESSION_BUS_ADDRESS`` at
+        ``unix:path=/run/user/gamemode-proxy``. Only the ``com.feralinteractive.GameMode``
+        name is allowed through the proxy (--filter --talk, no see/own/broadcast).
+        The socket itself is created by the supervisor after this method runs,
+        so only the uid-owned 0700 parent directory is validated here.
+        """
+        if proxy_host_path.name != GAMEMODE_PROXY_SOCKET_NAME or not proxy_host_path.is_absolute():
+            raise LaunchError("unsafe GameMode proxy path")
+        try:
+            parent = self.keep(open_directory_without_symlinks(proxy_host_path.parent))
+        except OSError as exc:
+            raise LaunchError(f"cannot access GameMode proxy directory: {exc}") from exc
+        metadata = os.fstat(parent)
+        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+            raise LaunchError("unsafe GameMode proxy directory")
+        expected = Path(os.path.abspath(proxy_host_path.parent))
+        if Path(os.readlink(f"/proc/self/fd/{parent}")) != expected:
+            raise LaunchError("GameMode proxy directory changed during preparation")
+        destination = f"/run/user/{GAMEMODE_PROXY_SOCKET_NAME}"
+        self.options += ["--ro-bind", str(proxy_host_path), destination]
+        self.options += ["--setenv", "DBUS_SESSION_BUS_ADDRESS", f"unix:path={destination}"]
+
+    def persistence(self, paths: AppPaths, game: GameInfo, game_root: Path | None = None) -> None:
         """Mount only the disposable runtime profile from the launcher cache."""
-        profile = ProfileCatalog(paths).create_for_game(game)
+        profile = ProfileCatalog(paths).create_for_game(game, game_root)
         profile_descriptor = self.keep(
             paths.open_or_create_private_cache_directory("profiles", profile.name, "sandbox")
         )
@@ -499,6 +526,19 @@ class Sandbox:
         self._validate_game_directory(saves, path / "save")
         self.bind(saves, "/saves", writable=True)
         return saves
+
+    def game_source_saves(self, source: GameInfo, descriptor: int) -> int:
+        """Pin the consented source save/ directory for EasyRPG launches.
+
+        The unpacked game tree stays the read-only /game mount while saves
+        live in the user-pointed source folder; --save-path stays /game/save.
+        Only RPG Maker 2000/2003 games qualify (save/ at the root, no
+        entrypoint parts). Validation mirrors game_saves: descriptor pinning,
+        0700 creation, ownership and permission checks, and tree validation.
+        """
+        if source.engine is not EngineName.RPG_MAKER_2000_2003:
+            raise LaunchError("source saves are only available for RPG Maker 2000/2003 games")
+        return self.game_saves(source, descriptor)
 
     def _validate_game_directory(self, descriptor: int, path: Path) -> None:
         """Reject an ancestor or save directory relocated while it was being opened."""
@@ -554,11 +594,21 @@ class Sandbox:
         next_name = parts[0] if parts else "save"
         for name in os.listdir(descriptor):
             if name == next_name:
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                try:
+                    metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                except OSError as exc:
+                    raise LaunchError(
+                        f"cannot prepare the game view at {destination}/{name}: {exc}"
+                    ) from exc
                 if not stat.S_ISDIR(metadata.st_mode):
                     raise LaunchError("unsafe NW.js save path or entrypoint ancestor")
                 continue
-            child = self.keep(os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=descriptor))
+            try:
+                child = self.keep(os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=descriptor))
+            except OSError as exc:
+                raise LaunchError(
+                    f"cannot prepare the game view at {destination}/{name}: {exc}"
+                ) from exc
             mode = os.fstat(child).st_mode
             if stat.S_ISLNK(mode):
                 # Read the pinned link, not a possibly replaced directory entry.
@@ -578,9 +628,16 @@ class Sandbox:
                 raise LaunchError(f"unsafe game entry in sandbox: {name}")
             self.bind(child, f"{destination}/{name}", writable=writable)
         if parts:
-            child = self.keep(
-                os.open(next_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-            )
+            try:
+                child = self.keep(
+                    os.open(
+                        next_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+                    )
+                )
+            except OSError as exc:
+                raise LaunchError(
+                    f"cannot prepare the game view at {destination}/{next_name}: {exc}"
+                ) from exc
             self._nw_directory(
                 child, f"{destination}/{next_name}", parts[1:], saves, tree_root=tree_root
             )
@@ -627,21 +684,28 @@ def validate_tree(descriptor: int, *, persistent: bool = False) -> None:
         raise error
 
     tree_root = Path(f"/proc/self/fd/{descriptor}").resolve(strict=True)
-    for _root, directories, files, parent in os.fwalk(".", dir_fd=descriptor, onerror=failed):
-        for name in (*directories, *files):
-            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if stat.S_ISLNK(metadata.st_mode):
-                target = os.readlink(name, dir_fd=parent)
-                if not persistent:
-                    # Resolve link chains before checking containment: lexical '..'
-                    # normalization alone misses escapes through directory links.
-                    try:
-                        resolved = Path(f"/proc/self/fd/{parent}", name).resolve()
-                    except OSError as exc:
-                        raise LaunchError("cannot resolve sandbox asset symlink") from exc
-                    if target.startswith("/") or not resolved.is_relative_to(tree_root):
-                        raise LaunchError("sandbox asset symlink escapes its tree")
-            elif not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
-                raise LaunchError("sandbox trees must not contain sockets or special files")
-            elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
-                raise LaunchError("sandbox files must not have hard links")
+    current = "."
+    try:
+        for _root, directories, files, parent in os.fwalk(".", dir_fd=descriptor, onerror=failed):
+            for name in (*directories, *files):
+                current = f"{_root}/{name}"
+                metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    target = os.readlink(name, dir_fd=parent)
+                    if not persistent:
+                        # Resolve link chains before checking containment: lexical '..'
+                        # normalization alone misses escapes through directory links.
+                        try:
+                            resolved = Path(f"/proc/self/fd/{parent}", name).resolve()
+                        except OSError as exc:
+                            raise LaunchError("cannot resolve sandbox asset symlink") from exc
+                        if target.startswith("/") or not resolved.is_relative_to(tree_root):
+                            raise LaunchError("sandbox asset symlink escapes its tree")
+                elif not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+                    raise LaunchError("sandbox trees must not contain sockets or special files")
+                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+                    raise LaunchError("sandbox files must not have hard links")
+    except OSError as exc:
+        # Name the walked path, not just the bare entry: a bare OSError
+        # cannot tell a transient lookup miss from a broken tree.
+        raise LaunchError(f"cannot validate sandbox tree at {current}: {exc}") from exc

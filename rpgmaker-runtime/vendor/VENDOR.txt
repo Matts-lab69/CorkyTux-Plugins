@@ -1,3 +1,1 @@
-ab58982d53ca1401a97759aa52f8916bf763f4ae 2026-09-12 feat(launch): explicit --x11 consent flag (v26.9.21, full tree).
-Wrapper passes --x11 on X11 sessions (= recorded user consent, no prompt);
-games still run isolated under bwrap either way.
+26.9.138 2026-09-27 vendored from box-project tag 26.9.138 (box-rpg backend)
