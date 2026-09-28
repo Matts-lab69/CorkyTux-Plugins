@@ -2576,10 +2576,12 @@ def _gog_rail_item(p: dict) -> dict:
     fecha = str(p.get("storeReleaseDate") or p.get("releaseDate") or "")
     anio = fecha[:4] if len(fecha) >= 4 and fecha[:4].isdigit() else ""
     cover = p.get("coverVertical", "") or p.get("coverHorizontal", "")
+    cover_h = p.get("coverHorizontal", "") or p.get("coverVertical", "")
     return {
         "id": str(p.get("id", "")),
         "title": str(p.get("title", "")),
         "cover": cover,
+        "cover_h": cover_h,
         "ptype": str(p.get("productType", "") or ""),
         "price_base": str(price.get("base", "")),
         "price_final": str(price.get("final", "")),
