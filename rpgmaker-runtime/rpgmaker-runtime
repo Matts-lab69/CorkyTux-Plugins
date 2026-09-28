@@ -285,8 +285,7 @@ def cmd_status(args):
         emit({"ok": True, "type": "done", "box_rpg_installed": False, "nwjs_runtimes": [], "easyrpg_runtimes": []})
         return
 
-    nwjs = run_box_rpg(["runtime", "nwjs", "list"])
-    easyrpg = run_box_rpg(["runtime", "easyrpg", "list"])
+    nwjs, easyrpg = _api_runtime_lines()
     emit({
         "ok": True,
         "type": "done",
@@ -294,17 +293,9 @@ def cmd_status(args):
         "box_rpg_mode": mode,
         "box_rpg_commit": box_vendor_commit() if mode == "bundled" else "",
         "box_rpg_path": box_bin() or "bundled",
-        "nwjs_runtimes": _parse_runtime_lines(nwjs.stdout),
-        "easyrpg_runtimes": _parse_runtime_lines(easyrpg.stdout),
+        "nwjs_runtimes": nwjs,
+        "easyrpg_runtimes": easyrpg,
     })
-
-
-def _parse_runtime_lines(stdout: str) -> list[str]:
-    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    # box-rpg prints "no X runtimes installed" as a single line when empty
-    if len(lines) == 1 and "installed" in lines[0] and lines[0].startswith("no "):
-        return []
-    return lines
 
 
 def cmd_install_box():
@@ -401,13 +392,9 @@ def cmd_install(args):
     version = args[2] if len(args) > 2 else None
 
     if version is None:
-        available = run_box_rpg(["runtime", kind, "available", "--page", "1"])
-        if available.returncode != 0:
-            fail(f"could not query available {kind} versions: {available.stderr.strip()}", exit_code=3)
-        versions = re.findall(r"^\s*\d+\.\s+(\S+)\s*$", available.stdout, flags=re.MULTILINE)
-        if not versions:
-            fail(f"no available {kind} versions found (page 1)", exit_code=3)
-        version = versions[0]
+        # Estructurado vía box.api: el texto CLI cambió de formato entre
+        # releases (números, tamaños, locale) y ya rompió el parseo una vez.
+        version = _api_first_available(kind)
 
     result = run_box_rpg(["runtime", kind, "install", version], timeout=600)
     if result.returncode != 0:
@@ -492,6 +479,144 @@ def cmd_run(args):
 
 # ---------- entry point ----------
 
+_API_BASE = (
+    "import sys, json; from pathlib import Path; "
+    "from box.paths import AppPaths; "
+    "paths = AppPaths.from_environment(); paths.ensure(); "
+)
+
+_API_SESSIONS = (
+    _API_BASE
+    + "from box.games.identity import game_id; "
+    + "from box.api.launch import find_live_sessions, stop_session; "
+    + "ident = game_id(Path(sys.argv[1]).expanduser().resolve()); "
+)
+
+_API_RUNTIME = (
+    _API_BASE
+    + "from box.api.runtime import (default_architecture, fetch_easyrpg_available, "
+    + "fetch_nwjs_available, list_easyrpg, list_nwjs); "
+    + "from box.runtime.catalog import RuntimeCatalog; "
+    + "from box.runtime.easyrpg import EasyRPGCatalog; "
+    + "cat = RuntimeCatalog(paths); ecat = EasyRPGCatalog(paths); "
+)
+
+
+def _box_api(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run box.api in a child (bundled vendor): structured data without
+    parsing CLI text (locale- and format-proof). `args` is [code, argv1]:
+    code must include its own prelude (_API_SESSIONS / _API_RUNTIME)."""
+    if box_mode() != "bundled":
+        fail("box.api queries need the bundled box-rpg copy — run 'install box' first",
+             exit_code=3)
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", _API_SESSIONS + args[0], args[1]],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=box_env(),
+        )
+    except subprocess.TimeoutExpired:
+        fail("box-rpg session query timed out", exit_code=3)
+
+
+def _api_first_available(kind: str) -> str:
+    """Latest available version via box.api (structured, no CLI parsing)."""
+    if kind == "nwjs":
+        code = ("av = fetch_nwjs_available(1, default_architecture(), False); "
+                "print(json.dumps({'versions': list(av.versions)}))")
+    else:
+        code = ("av = fetch_easyrpg_available(1); "
+                "print(json.dumps({'versions': list(av.versions)}))")
+    proc = _box_api([_API_RUNTIME + code, ""], timeout=120)
+    if proc.returncode != 0:
+        fail(f"could not query available {kind} versions: {proc.stderr.strip()}", exit_code=3)
+    try:
+        versions = json.loads(proc.stdout.strip()).get("versions", [])
+    except ValueError:
+        versions = []
+    if not versions:
+        fail(f"no available {kind} versions found (page 1)", exit_code=3)
+    return versions[0]
+
+
+def _api_runtime_lines() -> tuple[list[str], list[str]]:
+    """Installed runtimes via box.api as 'version arch root' lines
+    (same shape the launcher UI already parses)."""
+    code = ("n = [' '.join((r.spec.version, r.spec.architecture, str(r.root))) "
+            "for r in list_nwjs(cat)]; "
+            "e = [' '.join((r.version, 'x64', str(r.root))) "
+            "for r in list_easyrpg(ecat)]; "
+            "print(json.dumps({'nwjs': n, 'easyrpg': e}))")
+    proc = _box_api([_API_RUNTIME + code, ""], timeout=60)
+    if proc.returncode != 0:
+        fail(f"could not list runtimes: {proc.stderr.strip()}", exit_code=3)
+    try:
+        doc = json.loads(proc.stdout.strip())
+    except ValueError:
+        fail("runtime list returned garbage", exit_code=3)
+    return doc.get("nwjs", []), doc.get("easyrpg", [])
+
+
+def cmd_sessions(args):
+    if not args:
+        fail("sessions requires a game path", exit_code=2)
+    path = str(Path(args[0]).expanduser().resolve())
+    proc = _box_api([
+        _API_SESSIONS
+        + "print(json.dumps({'sessions': find_live_sessions(paths, ident), 'identifier': ident}))",
+        path,
+    ])
+    if proc.returncode != 0:
+        fail(proc.stderr.strip() or "sessions query failed", exit_code=3)
+    try:
+        doc = json.loads(proc.stdout.strip())
+    except ValueError:
+        fail("sessions query returned garbage", exit_code=3)
+    emit({"ok": True, "type": "done", "path": path,
+          "identifier": doc.get("identifier", ""),
+          "sessions": doc.get("sessions", [])})
+
+
+def cmd_stop(args):
+    if not args:
+        fail("stop requires a game path", exit_code=2)
+    path = str(Path(args[0]).expanduser().resolve())
+    proc = _box_api([
+        _API_SESSIONS
+        + "names = find_live_sessions(paths, ident); "
+        + "[stop_session(paths, ident, n) for n in names]; "
+        + "print(json.dumps({'stopped': names}))",
+        path,
+    ])
+    if proc.returncode != 0:
+        fail(proc.stderr.strip() or "stop failed", exit_code=3)
+    try:
+        doc = json.loads(proc.stdout.strip())
+    except ValueError:
+        fail("stop returned garbage", exit_code=3)
+    emit({"ok": True, "type": "done", "path": path,
+          "stopped": doc.get("stopped", [])})
+
+
+def cmd_runtime_remove(args):
+    if len(args) != 2 or args[0] not in ("nwjs", "easyrpg"):
+        fail("usage: runtime remove <nwjs|easyrpg> VERSION", exit_code=2)
+    kind, version = args
+    result = run_box_rpg(["runtime", kind, "remove", version], timeout=300)
+    if result.returncode != 0:
+        fail(f"remove failed: {result.stderr.strip() or result.stdout.strip()}", exit_code=3)
+    emit({"ok": True, "type": "done", "kind": kind, "removed_version": version})
+
+
+def cmd_config_show(args):
+    result = run_box_rpg(["config", "show"], timeout=30)
+    if result.returncode != 0:
+        fail(f"config show failed: {result.stderr.strip() or result.stdout.strip()}", exit_code=3)
+    emit({"ok": True, "type": "done", "output": result.stdout.strip()})
+
 def cmd_cleanup(args):
     """Passthrough to box-rpg cleanup (managed profiles, runtimes, downloads).
 
@@ -516,6 +641,10 @@ COMMANDS = {
     "status": cmd_status,
     "install": cmd_install,
     "run": cmd_run,
+    "sessions": cmd_sessions,
+    "stop": cmd_stop,
+    "runtime-remove": cmd_runtime_remove,
+    "config-show": cmd_config_show,
     "cleanup": cmd_cleanup,
 }
 

@@ -39,7 +39,16 @@ Comparación del vendor (`box-rpg` 26.9.21, sep-2026) con upstream actual
   `src` legacy). Antes fallaba con "no usable box-rpg sources".
 - `run` reenvía `--gamemode`, `--sdk`, `--ci-mount` (opt-in, upstream
   sigue denegando por defecto).
-- Tests propios (`tests/test_rpgmaker.py`), NOTICE con atribución,
+- Sesiones reales: `sessions` / `stop` (vía `box.api` en proceso hijo:
+  identificador estable, flock PID-reuse-safe), `runtime remove`,
+  `config show`. El launcher les da Play↔Stop, tiempo y Stop a los
+  juegos RPG (antes Stop era no-op).
+- Consentimientos por juego en la UI (modelo upstream: opt-in
+  explícito, off por defecto): red y escrituras, persistidos como
+  standing consent visible.
+- Regex de `available` tolera el formato con tamaños
+  (`1. v0.117.0 (195.7 MB)`); antes fallaba todo install.
+- Tests propios (`tests/test_rpgmaker.py`, 24), NOTICE con atribución,
   README con versión y flags nuevos.
 - Sin migración de usuario: config/cache ya viven bajo CorkyTux y los
   formatos de box-rpg son compatibles (verificado `status`, `scan`,

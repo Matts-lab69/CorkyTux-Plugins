@@ -77,19 +77,45 @@ class DetectHint(unittest.TestCase):
                 self.m.detect_engine_hint(Path(tmp) / "nope")["engine"], "unknown")
 
 
-class RuntimeLines(unittest.TestCase):
+class ApiRuntime(unittest.TestCase):
+    """Versiones/listas vía box.api estructurado (sin parsear texto CLI)."""
+
     @classmethod
     def setUpClass(cls):
         cls.m = load()
 
-    def test_vacio(self):
-        self.assertEqual(
-            self.m._parse_runtime_lines("no nwjs runtimes installed\n"), [])
+    def _proc(self, rc=0, out="", err=""):
+        import subprocess
+        return subprocess.CompletedProcess([], rc, out, err)
 
-    def test_lista(self):
-        self.assertEqual(
-            self.m._parse_runtime_lines("0.85.3\n0.83.0\n"),
-            ["0.85.3", "0.83.0"])
+    def test_first_available(self):
+        import json
+        fake = self._proc(0, json.dumps({"versions": ["v0.117.0", "v0.116.0"]}))
+        with mock.patch.object(self.m, "_box_api", return_value=fake) as ba:
+            self.assertEqual(self.m._api_first_available("nwjs"), "v0.117.0")
+            self.assertIn("fetch_nwjs_available", ba.call_args.args[0][0])
+
+    def test_first_available_vacio_falla(self):
+        import json
+        fake = self._proc(0, json.dumps({"versions": []}))
+        with mock.patch.object(self.m, "_box_api", return_value=fake):
+            with self.assertRaises(SystemExit):
+                self.m._api_first_available("easyrpg")
+
+    def test_runtime_lines(self):
+        import json
+        fake = self._proc(0, json.dumps({
+            "nwjs": ["v0.117.0 x64 /r/nw"], "easyrpg": ["0.8.1 x64 /r/er"]}))
+        with mock.patch.object(self.m, "_box_api", return_value=fake):
+            nw, er = self.m._api_runtime_lines()
+        self.assertEqual(nw, ["v0.117.0 x64 /r/nw"])
+        self.assertEqual(er, ["0.8.1 x64 /r/er"])
+
+    def test_runtime_lines_basura_falla(self):
+        fake = self._proc(0, "not-json{{{")
+        with mock.patch.object(self.m, "_box_api", return_value=fake):
+            with self.assertRaises(SystemExit):
+                self.m._api_runtime_lines()
 
 
 class NeedsX11(unittest.TestCase):
@@ -164,6 +190,100 @@ class RunForwarding(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             got = self._run(tmp)
             self.assertIn("allowed-game-root", got["box_calls"][0])
+
+
+class AvailableParsing(unittest.TestCase):
+    """Formato upstream 26.9.138: '  1. v0.117.0 (195.7 MB)'."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def _versions(self, out):
+        import re
+        return re.findall(r"^\s*\d+\.\s+(\S+)", out, flags=re.MULTILINE)
+
+    def test_con_tamano(self):
+        self.assertEqual(
+            self._versions("Available NW.js versions (page 1, x64):\n"
+                           "  1. v0.117.0 (195.7 MB)\n  2. v0.116.0 (194.9 MB)\n"),
+            ["v0.117.0", "v0.116.0"])
+
+    def test_easyrpg(self):
+        self.assertEqual(
+            self._versions("  1. 0.8.1 (5.9 MB)\n"),
+            ["0.8.1"])
+
+    def test_formato_viejo_sigue(self):
+        self.assertEqual(self._versions("  1. 0.8.1\n"), ["0.8.1"])
+
+
+class SessionCommands(unittest.TestCase):
+    """sessions/stop/runtime-remove/config-show (box hijo mockeado)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def _proc(self, rc=0, out="", err=""):
+        import subprocess
+        return subprocess.CompletedProcess([], rc, out, err)
+
+    def test_sessions_ok(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            events = []
+            fake = self._proc(0, json.dumps({"sessions": ["a"], "identifier": "id1"}))
+            with mock.patch.object(self.m, "_box_api", return_value=fake), \
+                 mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+                with self.assertRaises(SystemExit):
+                    self.m.cmd_sessions([tmp])
+            payload = em.call_args.args[0]
+            self.assertEqual((payload["sessions"], payload["identifier"]), (["a"], "id1"))
+
+    def test_sessions_fallo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._proc(1, "", "boom")
+            with mock.patch.object(self.m, "_box_api", return_value=fake):
+                with self.assertRaises(SystemExit):
+                    self.m.cmd_sessions([tmp])
+
+    def test_sessions_sin_path(self):
+        with self.assertRaises(SystemExit):
+            self.m.cmd_sessions([])
+
+    def test_stop_ok(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = self._proc(0, json.dumps({"stopped": ["a"]}))
+            with mock.patch.object(self.m, "_box_api", return_value=fake), \
+                 mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+                with self.assertRaises(SystemExit):
+                    self.m.cmd_stop([tmp])
+            self.assertEqual(em.call_args.args[0]["stopped"], ["a"])
+
+    def test_runtime_remove_uso(self):
+        with self.assertRaises(SystemExit):
+            self.m.cmd_runtime_remove(["nwjs"])
+        with self.assertRaises(SystemExit):
+            self.m.cmd_runtime_remove([])
+
+    def test_runtime_remove_ok(self):
+        fake = self._proc(0, "removed 0.8.1", "")
+        with mock.patch.object(self.m, "run_box_rpg", return_value=fake), \
+             mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+            with self.assertRaises(SystemExit):
+                self.m.cmd_runtime_remove(["easyrpg", "0.8.1"])
+        payload = em.call_args.args[0]
+        self.assertEqual((payload["kind"], payload["removed_version"]), ("easyrpg", "0.8.1"))
+
+    def test_config_show_ok(self):
+        fake = self._proc(0, "preferred_runtime: (none)\n", "")
+        with mock.patch.object(self.m, "run_box_rpg", return_value=fake), \
+             mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+            with self.assertRaises(SystemExit):
+                self.m.cmd_config_show([])
+        self.assertIn("preferred_runtime", em.call_args.args[0]["output"])
 
 
 if __name__ == "__main__":
