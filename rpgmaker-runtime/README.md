@@ -18,15 +18,18 @@ The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
 ./rpgmaker-runtime install --runtime easyrpg
 ./rpgmaker-runtime run "/path/to/my game"
 ./rpgmaker-runtime run "/path/to/my game" --runtime 6.8.1 --allow-network
+./rpgmaker-runtime run "/path/to/my game" --gamemode --ci-mount
 ./rpgmaker-runtime cleanup list profiles   # what box-rpg accumulated
 ```
 
-## Sandbox & display notes (box-rpg 26.9.21)
+## Sandbox & display notes (box-rpg 26.9.138)
 
 - Games run isolated under Bubblewrap: game assets are read-only, only saves,
   the profile and temp storage are writable. Network is **denied** unless you
   pass `run --allow-network`; self-updating games need `--allow-game-writes`
-  (only for games you trust).
+  (only for games you trust). Optional `run` wideners, all denied by
+  default upstream: `--gamemode`, `--sdk` (NW.js SDK build), `--ci-mount`
+  (case-insensitive mount for picky games).
 - On **X11** sessions the plugin passes upstream's explicit `--x11` flag
   (per-run consent, no prompt — your choice when installing this plugin;
   X11 clients can keylog). On Wayland the native path is used.
@@ -65,7 +68,8 @@ The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
 
 ## Credits
 
-- [christvh / box-rpg](https://gitlab.com/christvh/box-rpg) — I used the logic
-  from this repository and adapted it to a UI (bundled under `vendor/`).
+- [christvh / box-project](https://gitlab.com/christvh/box-project) — I used the
+  `box-rpg` backend logic from this repository and adapted it to a UI
+  (bundled under `vendor/`, see NOTICE; vendored at tag 26.9.138).
 - [EasyRPG Player](https://easyrpg.org) — RPG Maker 2000/2003 runtime.
 - [NW.js](https://nwjs.io) — RPG Maker MV/MZ runtime.

@@ -2,7 +2,7 @@
 """
 rpgmaker-runtime — CorkyTux plugin
 
-Thin wrapper around box-rpg (christvh/box-rpg), a Python 3.14+ CLI launcher
+Thin wrapper around box-rpg (christvh/box-project), a Python 3.14+ CLI launcher
 for RPG Maker MV/MZ (NW.js) and RPG Maker 2000/2003 (EasyRPG Player).
 
 This plugin deliberately does NOT reimplement detection, sandboxing, or
@@ -27,7 +27,10 @@ import sys
 from pathlib import Path
 
 BOX_RPG = "box-rpg"
-BOX_REPO = "https://gitlab.com/christvh/box-rpg"
+BOX_REPO = "https://gitlab.com/christvh/box-project"
+# Layout del upstream: monorepo box-project (box-rpg/src) desde ~26.9.9x;
+# antes el repo box-rpg traía src/ en la raíz. Se aceptan ambos.
+BOX_SRC_CANDIDATES = ("box-rpg/src", "src")
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 VENDOR_SRC = PLUGIN_DIR / "vendor" / "box-rpg-src"
@@ -103,7 +106,7 @@ def box_argv(args: list[str]) -> list[str]:
     if found is None:
         fail(
             "box-rpg not found — press Install box-rpg "
-            "(https://gitlab.com/christvh/box-rpg, requires Python 3.14+)",
+            "(https://gitlab.com/christvh/box-project, requires Python 3.14+)",
             exit_code=3,
         )
     return [found, *args]
@@ -140,7 +143,7 @@ def run_box_rpg(args: list[str], timeout: int = 60) -> subprocess.CompletedProce
     except FileNotFoundError:
         fail(
             "box-rpg not found — press Install box-rpg "
-            "(https://gitlab.com/christvh/box-rpg, requires Python 3.14+)",
+            "(https://gitlab.com/christvh/box-project, requires Python 3.14+)",
             exit_code=3,
         )
     except subprocess.TimeoutExpired:
@@ -334,8 +337,12 @@ def cmd_install_box():
             )
             if clone.returncode != 0:
                 fail(f"clone failed: {clone.stderr.strip()}", exit_code=3)
-        src = cache / "src"
-        if not (src / "box" / "cli" / "main.py").is_file():
+        src = None
+        for cand in BOX_SRC_CANDIDATES:
+            if (cache / cand / "box" / "cli" / "main.py").is_file():
+                src = cache / cand
+                break
+        if src is None:
             fail("cloned repo has no usable box-rpg sources", exit_code=3)
         dest = PLUGIN_DIR / "vendor" / "box-rpg-src"
         if dest.exists():
@@ -439,7 +446,7 @@ def cmd_run(args):
     if box_mode() == "missing":
         fail(
             "box-rpg not available — run 'install box' to fetch the bundled copy, "
-            "see https://gitlab.com/christvh/box-rpg",
+            "see https://gitlab.com/christvh/box-project",
             exit_code=3,
         )
 
@@ -454,7 +461,8 @@ def cmd_run(args):
     if runtime:
         launch_cmd += ["--runtime", runtime]
     # Opt-in sandbox wideners, forwarded verbatim (upstream defaults to deny).
-    for flag in ("--allow-network", "--allow-game-writes"):
+    for flag in ("--allow-network", "--allow-game-writes", "--gamemode",
+                 "--sdk", "--ci-mount"):
         if flag in args[1:] and flag not in launch_cmd:
             launch_cmd.append(flag)
     # --copy-root-file FILE may repeat (auxiliary files into the session).

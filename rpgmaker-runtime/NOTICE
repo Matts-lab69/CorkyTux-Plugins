@@ -1,0 +1,11 @@
+RPG Maker Runtime — attribution (BSD-3-Clause)
+
+The `vendor/box-rpg-src/` tree is the `box-rpg` backend from
+christvh/box-project <https://gitlab.com/christvh/box-project>,
+vendored at tag 26.9.138 (2026-09-27). Full license text in
+`vendor/BOX-RPG-LICENSE` (BSD 3-Clause, copyright (c) 2026 christvh).
+
+The `rpgmaker-runtime` wrapper itself (detection hints, plugin
+protocol, sandbox flag forwarding) is part of CorkyTux-Plugins.
+`box-rpg` is never modified: updates replace the vendored tree
+ wholesale via `install box`.
