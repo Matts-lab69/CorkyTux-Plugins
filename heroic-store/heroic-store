@@ -1762,7 +1762,16 @@ def cmd_reprobe(args):
               "wrote": False, "note": "dry-run; pass --write to apply"})
         return
     try:
-        shutil.copy2(INSTALLS_JSON, INSTALLS_JSON.with_suffix(".json.bak"))
+        import time as _t
+        _ts = _t.strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(INSTALLS_JSON,
+                     INSTALLS_JSON.parent / f"installs.json.bak-{_ts}")
+        for _bak in sorted(
+                INSTALLS_JSON.parent.glob("installs.json.bak-*"))[:-5]:
+            try:
+                _bak.unlink()
+            except OSError:
+                pass
     except OSError as e:
         die(3, f"could not back up installs.json: {e}")
     info["exe"] = exe

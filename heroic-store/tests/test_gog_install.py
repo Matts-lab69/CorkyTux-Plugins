@@ -660,7 +660,7 @@ class GogReprobe(unittest.TestCase):
             from pathlib import Path
             rec = json.loads((Path(tmp) / "installs.json").read_text())["gog:9"]
             self.assertEqual(rec["exe"], "Viejo.exe")
-            self.assertFalse((Path(tmp) / "installs.json.bak").exists())
+            self.assertEqual(list(Path(tmp).glob("installs.json.bak-*")), [])
 
     def test_write_solo_exe_mas_bak(self):
         import json
@@ -678,7 +678,7 @@ class GogReprobe(unittest.TestCase):
             rec = json.loads((Path(tmp) / "installs.json").read_text())["gog:9"]
             self.assertEqual(rec["exe"], "Nuevo.exe")
             self.assertEqual(rec["status"], "partial")
-            self.assertTrue((Path(tmp) / "installs.json.bak").exists())
+            self.assertEqual(len(list(Path(tmp).glob("installs.json.bak-*"))), 1)
 
     def test_exe_relativo_al_path_registrado(self):
         import tempfile
@@ -755,7 +755,7 @@ class GogReprobe(unittest.TestCase):
                     self.m.cmd_reprobe(self._ns(write=True, fix_path=True))
             rec = json.loads((Path(tmp) / "installs.json").read_text())["gog:9"]
             self.assertEqual(rec["path"], str(Path(tmp)))
-            self.assertFalse((Path(tmp) / "installs.json.bak").exists())
+            self.assertEqual(list(Path(tmp).glob("installs.json.bak-*")), [])
 
     def test_sin_registro_error(self):
         import tempfile
