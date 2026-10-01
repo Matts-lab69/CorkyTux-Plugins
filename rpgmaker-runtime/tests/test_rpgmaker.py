@@ -230,6 +230,69 @@ class RunForwarding(unittest.TestCase):
             self.assertIn("allowed-game-root", got["box_calls"][0])
 
 
+class SessionStatus(unittest.TestCase):
+    """session-status: running | exited N | unknown, never fails out."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load()
+
+    def _emit_payload(self, argv):
+        import json, subprocess
+        with mock.patch("subprocess.run") as ru, \
+             mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+            ru.return_value = subprocess.CompletedProcess([], 0, self._out)
+            with self.assertRaises(SystemExit):
+                self.m.cmd_session_status(argv)
+            return em.call_args.args[0]
+
+    def test_running(self):
+        import json, tempfile
+        self._out = json.dumps({"state": "running", "sessions": ["s1"]})
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._emit_payload([tmp])
+        self.assertEqual(got["state"], "running")
+        self.assertEqual(got["sessions"], ["s1"])
+
+    def test_exited_con_codigo(self):
+        import json, tempfile
+        self._out = json.dumps({"state": "exited", "codes": {"s1": 3}})
+        with tempfile.TemporaryDirectory() as tmp:
+            got = self._emit_payload([tmp])
+        self.assertEqual(got["state"], "exited")
+        self.assertEqual(got["codes"], {"s1": 3})
+
+    def test_desconocido_si_rc_distinto(self):
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("subprocess.run",
+                             return_value=subprocess.CompletedProcess([], 2, "", "x")), \
+                 mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+                with self.assertRaises(SystemExit):
+                    self.m.cmd_session_status([tmp])
+        self.assertEqual(em.call_args.args[0]["state"], "unknown")
+
+    def test_desconocido_si_timeout(self):
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("subprocess.run",
+                             side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)), \
+                 mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+                with self.assertRaises(SystemExit):
+                    self.m.cmd_session_status([tmp])
+        self.assertEqual(em.call_args.args[0]["state"], "unknown")
+
+    def test_desconocido_si_basura(self):
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("subprocess.run",
+                             return_value=subprocess.CompletedProcess([], 0, "basura {{{")), \
+                 mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
+                with self.assertRaises(SystemExit):
+                    self.m.cmd_session_status([tmp])
+        self.assertEqual(em.call_args.args[0]["state"], "unknown")
+
+
 class AvailableParsing(unittest.TestCase):
     """Upstream 26.9.138 format: '  1. v0.117.0 (195.7 MB)'."""
 

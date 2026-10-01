@@ -590,6 +590,77 @@ def cmd_sessions(args):
           "sessions": doc.get("sessions", [])})
 
 
+def cmd_session_status(args):
+    """One supervised session snapshot: running | exited N | unknown.
+
+    Never fails the caller on backend trouble: any box.api error, timeout
+    or garbage becomes "unknown" (exit 0), so the launcher poller treats
+    it as no-evidence instead of a state change. Unknown never closes a
+    session by itself; the launcher counts consecutive unknowns.
+    """
+    if not args:
+        fail("session-status requires a game path", exit_code=2)
+    path = str(Path(args[0]).expanduser().resolve())
+    lines = [
+        "import json",
+        "from box.api.launch import is_session_running as _alive, poll_launch_status as _poll",
+        "from box.api.launch import find_live_sessions as _live",
+        "from box.games.identity import game_id",
+        "res = {'state': 'unknown'}",
+        "try:",
+        "    ident = game_id(Path(sys.argv[1]).expanduser().resolve())",
+        "    try:",
+        "        iddir = paths.sessions_root / ident",
+        "        names = sorted([q.name for q in iddir.iterdir() if q.is_dir()])",
+        "    except OSError:",
+        "        names = []",
+        "    codes = {}",
+        "    for n in names:",
+        "        c = _poll(paths, ident, n)",
+        "        if isinstance(c, int):",
+        "            codes[n] = c",
+        "    live = [n for n in names if _alive(paths, ident, n) and n not in codes]",
+        "    if codes:",
+        "        res = {'state': 'exited', 'codes': codes}",
+        "    elif live:",
+        "        res = {'state': 'running', 'sessions': live}",
+        "    else:",
+        "        res = {'state': 'unknown'}",
+        "except Exception as e:",
+        "    res = {'state': 'unknown', 'error': str(e)[:120]}",
+        "print(json.dumps(res))",
+    ]
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _API_SESSIONS + "\n".join(lines), path],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=box_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        emit({"ok": True, "type": "done", "path": path, "state": "unknown"})
+        return
+    if proc.returncode != 0:
+        emit({"ok": True, "type": "done", "path": path, "state": "unknown"})
+        return
+    try:
+        doc = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        emit({"ok": True, "type": "done", "path": path, "state": "unknown"})
+        return
+    if doc.get("state") not in ("running", "exited", "unknown"):
+        emit({"ok": True, "type": "done", "path": path, "state": "unknown"})
+        return
+    out = {"ok": True, "type": "done", "path": path, "state": doc.get("state")}
+    if isinstance(doc.get("sessions"), list):
+        out["sessions"] = doc["sessions"]
+    if isinstance(doc.get("codes"), dict):
+        out["codes"] = doc["codes"]
+    emit(out)
+
+
 def cmd_stop(args):
     if not args:
         fail("stop requires a game path", exit_code=2)
@@ -653,6 +724,7 @@ COMMANDS = {
     "run": cmd_run,
     "sessions": cmd_sessions,
     "stop": cmd_stop,
+    "session-status": cmd_session_status,
     "runtime-remove": cmd_runtime_remove,
     "config-show": cmd_config_show,
     "cleanup": cmd_cleanup,
