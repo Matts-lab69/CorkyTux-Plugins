@@ -272,15 +272,15 @@ class SessionStatus(unittest.TestCase):
                     self.m.cmd_session_status([tmp])
         self.assertEqual(em.call_args.args[0]["state"], "unknown")
 
-    def test_desconocido_si_timeout(self):
+    def test_timeout_emite_timeout(self):
         import subprocess, tempfile
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("subprocess.run",
-                             side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)), \
+                             side_effect=subprocess.TimeoutExpired(cmd="x", timeout=3)), \
                  mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
                 with self.assertRaises(SystemExit):
                     self.m.cmd_session_status([tmp])
-        self.assertEqual(em.call_args.args[0]["state"], "unknown")
+        self.assertEqual(em.call_args.args[0]["state"], "timeout")
 
     def test_desconocido_si_basura(self):
         import subprocess, tempfile

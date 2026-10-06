@@ -636,10 +636,15 @@ def cmd_session_status(args):
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=3,
             env=box_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        # The poller runs on the launcher UI thread: 3 s caps the freeze,
+        # and "timeout" (unlike "unknown") never counts toward closing.
+        emit({"ok": True, "type": "done", "path": path, "state": "timeout"})
+        return
+    except OSError:
         emit({"ok": True, "type": "done", "path": path, "state": "unknown"})
         return
     if proc.returncode != 0:
