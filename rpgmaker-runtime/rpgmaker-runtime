@@ -404,15 +404,23 @@ def cmd_install(args):
     emit({"ok": True, "type": "done", "kind": kind, "installed_version": version})
 
 
-def _needs_x11() -> bool:
+def _needs_x11(path=None) -> bool:
     """True when the session is X11 (no owned Wayland socket).
 
-    Upstream box-rpg >= 26.9.21 accepts an explicit per-run `--x11` flag
-    as the X11 consent (no prompt), mirroring --allow-network. On Wayland
-    the native path is used instead.
+    EasyRPG (2k3) is X11-only: even with a Wayland socket present
+    (XWayland), box-rpg aborts the launch demanding explicit X11 consent,
+    so a 2k3 game always needs the flag. Upstream box-rpg >= 26.9.21
+    accepts the per-run `--x11` flag as that consent (no prompt),
+    mirroring --allow-network. On Wayland the native path is used instead.
     """
     if not os.environ.get("DISPLAY"):
         return False
+    if path is not None:
+        try:
+            if detect_engine_hint(Path(path)).get("engine") == "2k3":
+                return True
+        except OSError:
+            pass
     way = os.environ.get("WAYLAND_DISPLAY")
     if way:
         rt = os.environ.get("XDG_RUNTIME_DIR", "")
@@ -462,7 +470,7 @@ def cmd_run(args):
     for f in root_files:
         launch_cmd += ["--copy-root-file", f]
     # Explicit X11 consent for X11 sessions (upstream 26.9.21+ flag).
-    if _needs_x11() and "--x11" not in launch_cmd:
+    if _needs_x11(str(path)) and "--x11" not in launch_cmd:
         launch_cmd.append("--x11")
     try:
         subprocess.Popen(

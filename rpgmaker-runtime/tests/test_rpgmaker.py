@@ -140,6 +140,44 @@ class NeedsX11(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 self.assertFalse(self.m._needs_x11())
 
+    def _juego_2k3(self, base):
+        d = Path(base) / "juego"
+        d.mkdir()
+        for n in ("RPG_RT.ini", "RPG_RT.ldb", "RPG_RT.lmt"):
+            (d / n).write_text("x")
+        return str(d)
+
+    def test_2k3_en_wayland_pide_x11(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "wayland-0"
+            sock.write_text("")
+            juego = self._juego_2k3(tmp)
+            env = {"DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-0",
+                   "XDG_RUNTIME_DIR": tmp}
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertTrue(self.m._needs_x11(juego))
+
+    def test_2k3_en_x11_puro_pide_x11(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            juego = self._juego_2k3(tmp)
+            with mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
+                self.assertTrue(self.m._needs_x11(juego))
+
+    def test_no_2k3_en_wayland_no_pide_x11(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sock = Path(tmp) / "wayland-0"
+            sock.write_text("")
+            env = {"DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-0",
+                   "XDG_RUNTIME_DIR": tmp}
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertFalse(self.m._needs_x11(tmp))
+
+    def test_2k3_sin_display_no_pide_x11(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            juego = self._juego_2k3(tmp)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertFalse(self.m._needs_x11(juego))
+
 
 class RunForwarding(unittest.TestCase):
     """run forwards the opt-ins and demands --x11 on X11 (launching nothing real)."""
