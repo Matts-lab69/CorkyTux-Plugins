@@ -360,28 +360,99 @@ def cmd_install(args):
     emit({"type": "done", "ok": True, "version": args.version})
 
 
-def cmd_loader_versions(args):
-    _require_mll()
-    loader = (args.loader or "").strip().lower()
-    if loader not in LOADERS:
-        die(2, f"loader must be one of {LOADERS}")
+def _probe_mc(ml, mc_version):
+    """Resolve the mc spelling a loader can list against.
+
+    minecraft-launcher-lib normalizes NeoForge MC versions to the legacy
+    "1.x" spelling (_normalize_minecraft_version prefixes "1."), so
+    is_minecraft_version_supported("26.3") is False even though "1.26.3"
+    is listed. Try the legacy spelling before reporting "unsupported".
+    Returns the working spelling, or None when neither matches.
+    """
+    try:
+        if ml.is_minecraft_version_supported(mc_version):
+            return mc_version
+    except Exception:
+        return None
+    if not mc_version.startswith("1."):
+        alt = "1." + mc_version
+        try:
+            if ml.is_minecraft_version_supported(alt):
+                return alt
+        except Exception:
+            return None
+    return None
+
+
+def _probe_loader(loader, mc_version):
+    """Probe one loader for `mc_version` and build its response dict.
+    Shared by single and batch mode; raises on listing errors."""
     try:
         ml = mll.mod_loader.get_mod_loader(loader)
     except ValueError:
-        die(2, f"loader not supported: {loader}")
-    if not ml.is_minecraft_version_supported(args.mc_version):
-        emit({"type": "done", "ok": True, "loader": loader,
-              "mc_version": args.mc_version, "versions": [],
-              "supported": False})
+        return {"loader": loader, "supported": False, "versions": [],
+                "latest": "", "mc_version": mc_version}
+    eff = _probe_mc(ml, mc_version)
+    if eff is None:
+        return {"loader": loader, "supported": False, "versions": [],
+                "latest": "", "mc_version": mc_version}
+    versions = ml.get_loader_versions(eff, True)
+    latest = ml.get_latest_loader_version(eff)
+    return {"loader": loader, "supported": True, "versions": versions,
+            "latest": latest, "mc_version": mc_version,
+            "mc_version_matched": eff}
+
+
+def _cmd_loader_versions_batch(wanted, mc_version):
+    """Probe every requested loader in ONE python startup: the per-loader
+    HTTP fetches run in parallel threads, so the whole answer lands in
+    about one loader's latency instead of the sum of all of them."""
+    from concurrent.futures import ThreadPoolExecutor
+    results = {}
+    errors = {}
+
+    def run(l):
+        try:
+            return l, _probe_loader(l, mc_version), None
+        except Exception as e:
+            return l, None, str(e)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(wanted))) as ex:
+        for l, res, err in ex.map(run, wanted):
+            if err is not None:
+                errors[l] = err
+            else:
+                results[l] = res
+    emit({"type": "done", "ok": True, "mc_version": mc_version,
+          "loaders": [results[l] for l in wanted if l in results],
+          "errors": errors})
+
+
+def cmd_loader_versions(args):
+    _require_mll()
+    loader = (getattr(args, "loader", "") or "").strip().lower()
+    loaders_arg = (getattr(args, "loaders", "") or "").strip().lower()
+    if loaders_arg:
+        wanted = [x.strip() for x in loaders_arg.split(",") if x.strip()]
+        if not wanted:
+            die(2, "--loaders must list at least one loader")
+        for l in wanted:
+            if l not in LOADERS:
+                die(2, f"loader must be one of {LOADERS}: {l}")
+        _cmd_loader_versions_batch(wanted, args.mc_version)
         return
+    if not loader:
+        die(2, "either --loader or --loaders is required")
+    if loader not in LOADERS:
+        die(2, f"loader must be one of {LOADERS}")
     try:
-        versions = ml.get_loader_versions(args.mc_version, True)
-        latest = ml.get_latest_loader_version(args.mc_version)
+        res = _probe_loader(loader, args.mc_version)
     except Exception as e:
         die(3, f"Could not list {loader} versions: {e}")
     emit({"type": "done", "ok": True, "loader": loader,
-          "mc_version": args.mc_version, "versions": versions,
-          "latest": latest, "supported": True})
+          "mc_version": args.mc_version,
+          "versions": res["versions"], "latest": res["latest"],
+          "supported": res["supported"]})
 
 
 def _pct(value, maximum):
@@ -2358,7 +2429,8 @@ def main():
     p_install.set_defaults(func=cmd_install)
 
     p_lv = sub.add_parser("loader-versions")
-    p_lv.add_argument("--loader", required=True)
+    p_lv.add_argument("--loader", default="")
+    p_lv.add_argument("--loaders", default="")
     p_lv.add_argument("--mc-version", required=True)
     p_lv.set_defaults(func=cmd_loader_versions)
 
