@@ -315,6 +315,21 @@ def _mc_dir(args) -> Path:
         return d
     return MC_DIR
 
+def _install_neoforge_legacy(ml, version, mc_dir, loader_version, callbacks):
+    """Install NeoForge for a version that minecraft-launcher-lib only lists
+    under the legacy "1.x" spelling (26.3 -> 1.26.3). The ModLoader.install
+    wrapper gates on is_minecraft_version_supported / get_latest_loader_version
+    with the *modern* id and raises UnsupportedVersion even though builds
+    exist; run the same internal steps the wrapper runs, but resolved through
+    the spelling that actually lists builds. `_base` is an internal API: a
+    too-old mll without it fails loudly via AttributeError, never silently."""
+    mll.install.install_minecraft_version(version, str(mc_dir), callback=callbacks)
+    ml._base.install(version, str(mc_dir), callbacks, "java", loader_version)
+    installed_id = ml._base.get_installed_version(version, loader_version)
+    mll.install.install_minecraft_version(installed_id, str(mc_dir), callback=callbacks)
+    return installed_id
+
+
 def cmd_install(args):
     _require_mll()
     mc_dir = _mc_dir(args)
@@ -328,19 +343,32 @@ def cmd_install(args):
             ml = mll.mod_loader.get_mod_loader(loader)
         except ValueError:
             die(2, f"loader not supported by minecraft-launcher-lib: {loader}")
-        if not ml.is_minecraft_version_supported(args.version):
+        eff = _probe_mc(ml, args.version)
+        if eff is None:
             die(2, f"{loader} does not support Minecraft {args.version}")
         if not loader_version:
             try:
-                loader_version = ml.get_latest_loader_version(args.version)
+                loader_version = ml.get_latest_loader_version(eff)
             except Exception as e:
                 die(3, f"Could not resolve {loader} version: {e}")
         emit({"type": "progress", "stage": f"installing-{loader}-{loader_version}",
               "percent": None})
         try:
-            installed_id = ml.install(args.version, str(mc_dir),
-                                      loader_version=loader_version,
-                                      callback=_install_callbacks())
+            if loader == "neoforge" and eff != args.version:
+                # Wrapper install() raises UnsupportedVersion on the modern
+                # spelling; _base.install has no support gate. Beta loader
+                # builds (ids ending in -beta) install the same way.
+                if not hasattr(ml, "_base") or not hasattr(ml._base, "install"):
+                    raise AttributeError("minecraft-launcher-lib lacks the internal _base.install API")
+                installed_id = _install_neoforge_legacy(
+                    ml, args.version, str(mc_dir), loader_version, _install_callbacks())
+            else:
+                installed_id = ml.install(args.version, str(mc_dir),
+                                          loader_version=loader_version,
+                                          callback=_install_callbacks())
+        except AttributeError as e:
+            die(3, f"NeoForge install for {args.version} needs a newer "
+                   f"minecraft-launcher-lib ({e})")
         except Exception as e:
             die(3, f"Install failed: {e}")
         emit({"type": "done", "ok": True, "version": installed_id,
