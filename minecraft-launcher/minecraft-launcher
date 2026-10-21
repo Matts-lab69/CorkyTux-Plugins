@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -52,6 +53,76 @@ JAVA_JSON = CONFIG_DIR / "java.json"
 JAVA_VERSIONS = ["8", "17", "21", "25"]
 
 LOGS_DIR = Path.home() / ".local" / "share" / "CorkyTux" / "logs"
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create a state directory and migrate an older 0755 one to 0700."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        st = path.lstat()
+    except OSError:
+        return
+    if stat.S_ISDIR(st.st_mode):
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
+def _harden_private_file(path: Path) -> None:
+    """Tighten a token file left by an older build, without following links."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return
+    if not stat.S_ISREG(st.st_mode) or not (st.st_mode & 0o077):
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _write_private_json(path: Path, data) -> None:
+    """Tmp + replace, with the temp created 0600 by open() itself."""
+    _ensure_private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _open_private_log(path: Path):
+    """Open a fresh log 0600 from creation; replace an older 0644 collision."""
+    _ensure_private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.replace(tmp, path)
+    except BaseException:
+        os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return os.fdopen(fd, "w")
+
+
+def _ensure_private_state() -> None:
+    _ensure_private_dir(CONFIG_DIR)
+    _harden_private_file(ACCOUNTS_FILE)
+    _harden_private_file(CURSE_JSON)
 
 
 def _mc_parts(mc_version: str):
@@ -260,10 +331,8 @@ def cmd_auth(args):
         "name": profile["name"],
         "access_token": mc_access_token,
     }
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    accounts = json.loads(ACCOUNTS_FILE.read_text()) if ACCOUNTS_FILE.exists() else []
-    accounts = [a for a in accounts if a["id"] != account["id"]] + [account]
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+    accounts = [a for a in _load_accounts() if a["id"] != account["id"]] + [account]
+    _save_accounts(accounts)
 
     emit({"type": "done", "ok": True, "account_id": account["id"], "username": account["name"]})
 
@@ -546,7 +615,7 @@ def cmd_launch(args):
     if not ACCOUNTS_FILE.exists():
         die(4, "No accounts. Run 'auth' first.")
 
-    accounts = json.loads(ACCOUNTS_FILE.read_text())
+    accounts = _load_accounts()
     account = next((a for a in accounts if a["id"] == args.account), None) if args.account else (accounts[0] if accounts else None)
     if not account:
         die(4, f"Account not found: {args.account}")
@@ -655,11 +724,10 @@ def cmd_launch(args):
             emit({"type": "progress", "stage": "pre_hook_failed", "percent": None})
 
     import datetime as _dt
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
     safe_ver = re.sub(r"[^A-Za-z0-9._-]+", "_", args.version)
     log_path = LOGS_DIR / f"Minecraft-{safe_ver}-{_dt.datetime.now():%Y%m%d-%H%M%S}.log"
     try:
-        log_fh = open(log_path, "w")
+        log_fh = _open_private_log(log_path)
         log_fh.write(f"# CorkyTux Minecraft {args.version} as {account['name']} java={java_bin}\n")
         log_fh.write(f"# cmd: {' '.join(command)}\n")
         log_fh.flush()
@@ -691,8 +759,8 @@ def cmd_status(args):
         try:
             accounts = [{"id": a["id"], "name": a["name"], "offline": a.get("offline", False),
                          "ely": a.get("ely", False)}
-                        for a in json.loads(ACCOUNTS_FILE.read_text())]
-        except ValueError:
+                        for a in _load_accounts()]
+        except (KeyError, TypeError):
             accounts = []
     mods_dir = mc_dir / "mods"
     mods_count = 0
@@ -1123,10 +1191,8 @@ def cmd_offline(args):
     raw[8] = (raw[8] & 0x3F) | 0x80
     uid = str(ulib.UUID(bytes=bytes(raw))).replace("-", "")
     account = {"id": uid, "name": name, "access_token": "0", "offline": True}
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    accounts = json.loads(ACCOUNTS_FILE.read_text()) if ACCOUNTS_FILE.exists() else []
-    accounts = [a for a in accounts if a["id"] != account["id"]] + [account]
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+    accounts = [a for a in _load_accounts() if a["id"] != account["id"]] + [account]
+    _save_accounts(accounts)
     emit({"type": "done", "ok": True, "account_id": uid, "username": name,
           "offline": True})
 
@@ -1134,7 +1200,7 @@ def cmd_offline(args):
 def cmd_unaccount(args):
     if not ACCOUNTS_FILE.exists():
         die(4, "no accounts")
-    accounts = json.loads(ACCOUNTS_FILE.read_text())
+    accounts = _load_accounts()
     gone = next((a for a in accounts if a["id"] == args.account), None)
     if gone is None:
         die(4, f"account not found: {args.account}")
@@ -1144,9 +1210,9 @@ def cmd_unaccount(args):
             "clientToken": gone.get("client_token", ""),
         })
         # invalidate never fails hard; local remove always happens
-        accounts = json.loads(ACCOUNTS_FILE.read_text())
+        accounts = _load_accounts()
     kept = [a for a in accounts if a["id"] != args.account]
-    ACCOUNTS_FILE.write_text(json.dumps(kept, indent=2))
+    _save_accounts(kept)
     emit({"type": "done", "ok": True, "removed": args.account})
 
 
@@ -1186,6 +1252,8 @@ def _ely_error(status: int, payload: dict) -> str:
 
 
 def _load_accounts():
+    _ensure_private_dir(CONFIG_DIR)
+    _harden_private_file(ACCOUNTS_FILE)
     try:
         return json.loads(ACCOUNTS_FILE.read_text()) if ACCOUNTS_FILE.exists() else []
     except ValueError:
@@ -1193,8 +1261,7 @@ def _load_accounts():
 
 
 def _save_accounts(accounts):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2))
+    _write_private_json(ACCOUNTS_FILE, accounts)
 
 
 def cmd_ely_auth(args):
@@ -1467,7 +1534,7 @@ def cmd_stop(args):
     accounts = []
     if ACCOUNTS_FILE.exists():
         try:
-            accounts = json.loads(ACCOUNTS_FILE.read_text())
+            accounts = _load_accounts()
         except ValueError:
             accounts = []
     ids = [a["id"] for a in accounts
@@ -1713,12 +1780,7 @@ def cmd_curse_auth_config(args):
         return
     if len(key) < 20:
         die(2, "api_key looks invalid (paste the full $2a$10$... key)")
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CURSE_JSON.write_text(json.dumps({"api_key": key}, indent=2))
-    try:
-        os.chmod(CURSE_JSON, 0o600)
-    except OSError:
-        pass
+    _write_private_json(CURSE_JSON, {"api_key": key})
     emit({"type": "done", "ok": True, "configured": True})
 
 
@@ -2439,6 +2501,7 @@ def _patch_requests_timeouts(default=120):
 
 def main():
     _patch_requests_timeouts()
+    _ensure_private_state()
     parser = argparse.ArgumentParser(prog="minecraft-launcher")
     sub = parser.add_subparsers(dest="command", required=True)
 
