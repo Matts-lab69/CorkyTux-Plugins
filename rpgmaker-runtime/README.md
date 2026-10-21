@@ -8,14 +8,15 @@ The `rpgmaker-runtime` plugin runs RPG Maker **MV/MZ** (NW.js) and
 
 - `scan` finds RPG Maker games in a folder (detects MV/MZ vs 2000/2003).
 - `diagnose` tells you which runtime is missing and how to fix it.
-- `install` downloads/installs the needed runtime.
+- `install` downloads/installs the needed runtime. It uses subcommands:
+  `install check`, `install box`, or `install runtime <nwjs|easyrpg> [VERSION]`.
 - `run` launches the game with the right profile.
 
 ```bash
 ./rpgmaker-runtime status
 ./rpgmaker-runtime scan /path/to/my/games
 ./rpgmaker-runtime diagnose "/path/to/my game"
-./rpgmaker-runtime install --runtime easyrpg
+./rpgmaker-runtime install runtime easyrpg
 ./rpgmaker-runtime run "/path/to/my game"
 ./rpgmaker-runtime run "/path/to/my game" --runtime 6.8.1 --allow-network
 ./rpgmaker-runtime run "/path/to/my game" --gamemode --ci-mount

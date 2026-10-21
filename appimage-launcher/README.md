@@ -7,7 +7,7 @@ The `appimage-launcher` plugin runs and organizes your `.AppImage` files
 
 ```bash
 ./appimage-launcher status
-./appimage-launcher scan ~/AppImages
+./appimage-launcher scan ~/AppImages/Dolphin.AppImage
 ./appimage-launcher integrate ~/AppImages/Dolphin.AppImage  # copies to ~/Applications
 ./appimage-launcher run ~/Applications/Dolphin.AppImage
 ./appimage-launcher icon ~/Applications/Dolphin.AppImage    # extracts the icon
@@ -18,8 +18,9 @@ The `appimage-launcher` plugin runs and organizes your `.AppImage` files
 
 1. Install the plugin (Settings > Plugins) or copy `appimage-launcher` +
    `plugin.json` to `~/.local/share/CorkyTux/plugins/appimage-launcher/`.
-2. Scan your AppImage folder, integrate the ones you use into `~/Applications`
-   and launch them detached from the library.
+2. Scan an AppImage file, integrate the ones you use into `~/Applications` and
+   launch them detached from the library. `scan` inspects one file; to list a
+   folder, pass each `*.AppImage` explicitly (for example with `find`).
 
 ## Notes
 
