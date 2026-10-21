@@ -1,7 +1,9 @@
 {
+  "id": "dll-overrides-automator",
   "name": "DLL Overrides Automator",
   "version": "1.1.0",
   "entry": "dll-overrides-automator",
+  "type": "Tool",
   "description": "Automatically configures DLL overrides for Windows games. Scans game directories, generates WINEDLLOVERRIDES, and manages DLL patching when your game needs custom DLLs.",
   "capabilities": ["scan", "patch", "unpatch", "status", "install"],
   "protocol": {
