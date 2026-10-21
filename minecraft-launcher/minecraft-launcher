@@ -125,6 +125,98 @@ def _ensure_private_state() -> None:
     _harden_private_file(CURSE_JSON)
 
 
+# --- Secret redaction ----------------------------------------------------
+
+REDACTED = "<REDACTED>"
+
+# CLI flags whose value is a secret. The value is the next argv entry.
+_SECRET_FLAGS = {
+    "--accesstoken", "--access_token", "--password", "--api-key", "--api_key",
+    "--client-secret", "--secret", "--refresh-token", "--refresh_token",
+    "--client-token", "--client_token", "--device-code", "--user-code",
+    "--auth-code", "--authorization-code",
+}
+
+# Ordered pattern families. Each family has its own test in
+# tests/test_redaction.py, so a new pattern cannot land without coverage.
+_SECRET_PATTERNS = {
+    # 1. --accessToken <value> (also --access_token)
+    "cli_access_token": [
+        (re.compile(r'(?i)(--access[_-]?token)([= ]+)("[^"]*"|\'[^\']*\'|[^\s"\']+)'),
+         r'\1\2' + REDACTED),
+    ],
+    # 2. --password <value>
+    "cli_password": [
+        (re.compile(r'(?i)(--password)([= ]+)("[^"]*"|\'[^\']*\'|[^\s"\']+)'),
+         r'\1\2' + REDACTED),
+    ],
+    # 3. --api-key <value> (also --api_key)
+    "cli_api_key": [
+        (re.compile(r'(?i)(--api[_-]?key)([= ]+)("[^"]*"|\'[^\']*\'|[^\s"\']+)'),
+         r'\1\2' + REDACTED),
+    ],
+    # 4. Token fields, quoted (JSON) and bare (query/body style)
+    "json_token": [
+        (re.compile(r'(?i)("(?:access[_-]?token|client[_-]?token|refresh[_-]?token'
+                    r'|id[_-]?token|identitytoken)"\s*:\s*)"(?:[^"\\]|\\.)*"'),
+         r'\1"' + REDACTED + '"'),
+        (re.compile(r'(?i)\b(access[_-]?token|client[_-]?token|refresh[_-]?token'
+                    r'|id[_-]?token|identitytoken)(=)([^\s"\'&,;]+)'),
+         r'\1\2' + REDACTED),
+    ],
+    # 5. Secret fields: passwords, API keys, auth codes
+    "json_secret": [
+        (re.compile(r'(?i)("(?:password|api[_-]?key|auth[_-]?code|authorization[_-]?code'
+                    r'|device[_-]?code|user[_-]?code)"\s*:\s*)"(?:[^"\\]|\\.)*"'),
+         r'\1"' + REDACTED + '"'),
+        (re.compile(r'(?i)\b(password|api[_-]?key|auth[_-]?code|authorization[_-]?code'
+                    r'|device[_-]?code|user[_-]?code)(=)([^\s"\'&,;]+)'),
+         r'\1\2' + REDACTED),
+    ],
+    # 6. Authorization: Bearer <token>
+    "bearer": [
+        (re.compile(r'(?i)(authorization\s*:\s*bearer\s+)(\S+)'), r'\1' + REDACTED),
+    ],
+    # 7. x-api-key: <key>
+    "x_api_key": [
+        (re.compile(r'(?i)(x-api-key\s*:\s*)(\S+)'), r'\1' + REDACTED),
+    ],
+    # 8. Xbox RpsTicket (d=<ms token>) and the XBL3.0 identity token
+    "xbox": [
+        (re.compile(r'(?i)(rpsTicket"?\s*[:=]\s*"?d=)(\S+)'), r'\1' + REDACTED),
+        (re.compile(r'(XBL3\.0\s+x=[^;\s"]+;)(\S+)'), r'\1' + REDACTED),
+    ],
+}
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip secrets from free text before it reaches a log or a message."""
+    if not text:
+        return text
+    for rules in _SECRET_PATTERNS.values():
+        for pattern, replacement in rules:
+            text = pattern.sub(replacement, text)
+    return text
+
+
+def _redact_argv(argv) -> list:
+    """Redact a launch argv: secret flag values and secret-looking args."""
+    out = []
+    redact_next = False
+    for arg in argv or []:
+        text = str(arg)
+        if redact_next:
+            out.append(REDACTED)
+            redact_next = False
+            continue
+        if text.lower() in _SECRET_FLAGS:
+            out.append(text)
+            redact_next = True
+            continue
+        out.append(_redact_secrets(text))
+    return out
+
+
 def _mc_parts(mc_version: str):
     m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", (mc_version or "").strip())
     if not m:
@@ -246,7 +338,10 @@ def emit(event: dict):
 
 
 def die(code: int, message: str):
-    emit({"type": "error", "message": message})
+    # A failed request can echo the payload it sent (token, password, key).
+    # The message goes to the launcher UI and to the launcher log, so it is
+    # redacted here, before anything is written.
+    emit({"type": "error", "message": _redact_secrets(message)})
     sys.exit(code)
 
 
@@ -713,7 +808,8 @@ def cmd_launch(args):
     if args.dry_run:
         _account_lock_path(account["id"]).unlink(missing_ok=True)
         emit({"type": "done", "ok": True, "dry_run": True,
-              "java": command[0] if command else "", "argv": command})
+              "java": command[0] if command else "",
+              "argv": _redact_argv(command)})
         return
 
     if args.pre_hook and args.pre_hook.strip():
@@ -729,7 +825,9 @@ def cmd_launch(args):
     try:
         log_fh = _open_private_log(log_path)
         log_fh.write(f"# CorkyTux Minecraft {args.version} as {account['name']} java={java_bin}\n")
-        log_fh.write(f"# cmd: {' '.join(command)}\n")
+        # The launch argv carries --accessToken: redact it before it is
+        # written, never after.
+        log_fh.write(f"# cmd: {' '.join(_redact_argv(command))}\n")
         log_fh.flush()
     except OSError as e:
         _account_lock_path(account["id"]).unlink(missing_ok=True)
