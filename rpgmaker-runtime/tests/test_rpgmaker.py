@@ -238,7 +238,7 @@ class SessionStatus(unittest.TestCase):
         cls.m = load()
 
     def _emit_payload(self, argv):
-        import json, subprocess
+        import subprocess
         with mock.patch("subprocess.run") as ru, \
              mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:
             ru.return_value = subprocess.CompletedProcess([], 0, self._out)
@@ -247,7 +247,8 @@ class SessionStatus(unittest.TestCase):
             return em.call_args.args[0]
 
     def test_running(self):
-        import json, tempfile
+        import json
+        import tempfile
         self._out = json.dumps({"state": "running", "sessions": ["s1"]})
         with tempfile.TemporaryDirectory() as tmp:
             got = self._emit_payload([tmp])
@@ -255,7 +256,8 @@ class SessionStatus(unittest.TestCase):
         self.assertEqual(got["sessions"], ["s1"])
 
     def test_exited_con_codigo(self):
-        import json, tempfile
+        import json
+        import tempfile
         self._out = json.dumps({"state": "exited", "codes": {"s1": 3}})
         with tempfile.TemporaryDirectory() as tmp:
             got = self._emit_payload([tmp])
@@ -263,7 +265,8 @@ class SessionStatus(unittest.TestCase):
         self.assertEqual(got["codes"], {"s1": 3})
 
     def test_desconocido_si_rc_distinto(self):
-        import subprocess, tempfile
+        import subprocess
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("subprocess.run",
                              return_value=subprocess.CompletedProcess([], 2, "", "x")), \
@@ -273,7 +276,8 @@ class SessionStatus(unittest.TestCase):
         self.assertEqual(em.call_args.args[0]["state"], "unknown")
 
     def test_timeout_emite_timeout(self):
-        import subprocess, tempfile
+        import subprocess
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("subprocess.run",
                              side_effect=subprocess.TimeoutExpired(cmd="x", timeout=3)), \
@@ -283,7 +287,8 @@ class SessionStatus(unittest.TestCase):
         self.assertEqual(em.call_args.args[0]["state"], "timeout")
 
     def test_desconocido_si_basura(self):
-        import subprocess, tempfile
+        import subprocess
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("subprocess.run",
                              return_value=subprocess.CompletedProcess([], 0, "basura {{{")), \
@@ -333,7 +338,6 @@ class SessionCommands(unittest.TestCase):
     def test_sessions_ok(self):
         import json
         with tempfile.TemporaryDirectory() as tmp:
-            events = []
             fake = self._proc(0, json.dumps({"sessions": ["a"], "identifier": "id1"}))
             with mock.patch.object(self.m, "_box_api", return_value=fake), \
                  mock.patch.object(self.m, "emit", side_effect=SystemExit(0)) as em:

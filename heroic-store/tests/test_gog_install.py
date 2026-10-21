@@ -590,7 +590,6 @@ class GogInstallE2E(unittest.TestCase):
     def test_path_base_sin_doble_carpeta(self):
         import tempfile
         from pathlib import Path
-        from unittest import mock
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "Heroic"
@@ -776,7 +775,6 @@ class GogInstallGate(unittest.TestCase):
         cls.m = load()
 
     def _base_env(self, tmp):
-        import json
         from pathlib import Path
         from unittest.mock import patch
         base = Path(tmp) / "Heroic"
@@ -902,7 +900,7 @@ class GogReinstallRobusto(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             ip = Path(tmp) / "installs.json"
-            ip.write_text('{"gog:9": {"path": "%s", "exe": ""}}' % base)
+            ip.write_text(f'{{"gog:9": {{"path": "{base}", "exe": ""}}}}')
             with mock.patch.object(self.m, "CONFIG_DIR", Path(tmp)), \
                     mock.patch.object(self.m, "INSTALLS_JSON", ip):
                 self.m._mark_partial("gog", "9", str(base / "Juego"))
@@ -919,7 +917,7 @@ class GogReinstallRobusto(unittest.TestCase):
             game.mkdir()
             (game / "Juego.exe").write_bytes(b"x")
             ip = Path(tmp) / "installs.json"
-            ip.write_text('{"gog:9": {"path": "%s", "exe": "Juego.exe"}}' % game)
+            ip.write_text(f'{{"gog:9": {{"path": "{game}", "exe": "Juego.exe"}}}}')
             with mock.patch.object(self.m, "CONFIG_DIR", Path(tmp)), \
                     mock.patch.object(self.m, "INSTALLS_JSON", ip):
                 with self.assertRaises(SystemExit) as cm:
@@ -966,7 +964,6 @@ class GogRepairPath(unittest.TestCase):
         cls.m = load()
 
     def _env(self, tmp):
-        import json
         from pathlib import Path
         from unittest.mock import patch
         base = Path(tmp) / "Heroic"
