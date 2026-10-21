@@ -785,7 +785,7 @@ def check_verbs(proton_path=None):
     wt = find_winetricks(proton_path)
     if wt:
         try:
-            with open(wt, 'r', errors='replace') as f:
+            with open(wt, errors='replace') as f:
                 available = set(re.findall(r'load_([a-z0-9_]+)\(\)', f.read()))
         except OSError:
             pass
