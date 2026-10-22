@@ -574,6 +574,35 @@ def _gog_access_token():
         return ""
 
 
+def _epic_version_and_date(game: dict):
+    """(version, last_updated) of an Epic game, as the catalog knows them.
+
+    `legendary list --json` has no `app_version`: the catalog version is
+    `asset_infos.<platform>.build_version` and the catalog date is
+    `metadata.lastModifiedDate`. I read the platform in the order the
+    launcher uses (Windows first: the games run under Proton) and I cut the
+    date to YYYY-MM-DD. Both are empty when the catalog does not have them.
+    """
+    version = ""
+    infos = game.get("asset_infos") or {}
+    if isinstance(infos, dict):
+        for platform in ("Windows", "Other", "Mac", "Linux"):
+            info = infos.get(platform) or {}
+            if not isinstance(info, dict):
+                continue
+            build = str(info.get("build_version") or "").strip()
+            if build:
+                version = build
+                break
+    last_updated = ""
+    meta = game.get("metadata") or {}
+    if isinstance(meta, dict):
+        stamp = str(meta.get("lastModifiedDate") or "").strip()
+        if len(stamp) >= 10:
+            last_updated = stamp[:10]
+    return version, last_updated
+
+
 def _epic_cover(game: dict) -> str:
     meta = game.get("metadata") or {}
     imgs = meta.get("keyImages") or []
@@ -941,6 +970,7 @@ def cmd_game_info(args):
         meta = g.get("metadata") or {}
         title = str(g.get("app_title") or "")
         app_id = g.get("app_name") or ""
+        _ver, _last_upd = _epic_version_and_date(g)
         force = bool(getattr(args, "force_description", False))
         lang = args.lang or "spanish"
         saved = _descriptions_load().get(app_id) or {}
@@ -953,7 +983,7 @@ def cmd_game_info(args):
         if not force and saved_desc:
             emit({"type": "done", "ok": True, "store": "epic", "info": {
                 "app_id": app_id, "title": title,
-                "version": g.get("app_version", ""),
+                "version": _ver, "last_updated": _last_upd,
                 "cover": _epic_cover(g),
                 "description": saved_desc[:1500],
                 "description_source": saved.get("source") or "fallback",
@@ -970,7 +1000,7 @@ def cmd_game_info(args):
             if _t.time() - float(saved.get("no_description_checked_at", 0)) < NO_DESC_RETRY:
                 emit({"type": "done", "ok": True, "store": "epic", "info": {
                     "app_id": app_id, "title": title,
-                    "version": g.get("app_version", ""),
+                    "version": _ver, "last_updated": _last_upd,
                     "cover": _epic_cover(g),
                     "description": "", "description_source": "fallback",
                     "source_url": "",
@@ -1015,7 +1045,7 @@ def cmd_game_info(args):
             })
         emit({"type": "done", "ok": True, "store": "epic", "info": {
             "app_id": app_id, "title": title,
-            "version": g.get("app_version", ""),
+            "version": _ver, "last_updated": _last_upd,
             "cover": _epic_cover(g),
             "description": desc[:1500],
             "description_source": desc_source,
@@ -1215,7 +1245,8 @@ def cmd_library(args):
                 _write_json_atomic(DESCRIPTIONS_FILE, data)
         emit({"type": "done", "ok": True, "store": "epic", "games": [
             {"app_id": g.get("app_name"), "title": g.get("app_title"),
-             "version": g.get("app_version", ""),
+             "version": _epic_version_and_date(g)[0],
+             "last_updated": _epic_version_and_date(g)[1],
              "installed": status.get(g.get("app_name"), {}).get("installed", False),
              "stale_registry": status.get(g.get("app_name"), {}).get("stale", False),
              "install_path": status.get(g.get("app_name"), {}).get("install_path", "") if status.get(g.get("app_name"), {}).get("installed", False) else "",
@@ -1396,7 +1427,8 @@ def cmd_refresh_library(args):
     total = len(rows)
     emit({"type": "library", "store": "epic", "games": [
         {"app_id": g.get("app_name"), "title": g.get("app_title"),
-         "version": g.get("app_version", ""),
+         "version": _epic_version_and_date(g)[0],
+         "last_updated": _epic_version_and_date(g)[1],
          "installed": status.get(g.get("app_name"), {}).get("installed", False),
          "stale_registry": status.get(g.get("app_name"), {}).get("stale", False),
          "install_path": status.get(g.get("app_name"), {}).get("install_path", "") if status.get(g.get("app_name"), {}).get("installed", False) else "",
