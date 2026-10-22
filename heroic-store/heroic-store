@@ -3119,7 +3119,7 @@ def _epic_sale_search(count=40, start=0, country: str = "US"):
     import urllib.request
     if not _re.fullmatch(r"[A-Z]{2}", str(country or "")):
         country = "US"
-    fields = ("""paging { total }
+    fields_tpl = """paging { total }
       elements {
         title description urlSlug productSlug
         catalogNs { mappings { pageSlug pageType } }
@@ -3130,10 +3130,13 @@ def _epic_sale_search(count=40, start=0, country: str = "US"):
         }
         promotions { promotionalOffers { promotionalOffers {
           startDate endDate discountSetting { discountPercentage } } } }
-      }""" % country)
+      }"""
+    # The GraphQL braces would all have to be doubled in an f-string, so the
+    # template keeps the %-formatting on purpose.
+    fields = fields_tpl % country  # noqa: UP031
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
                "Content-Type": "application/json", "Accept": "application/json"}
-    query = """query {
+    query_tpl = """query {
   Catalog {
     searchStore(category: "games", count: %d, country: "%s", keywords: "",
                 locale: "en-US", onSale: true, sortBy: "relevancy",
@@ -3141,7 +3144,9 @@ def _epic_sale_search(count=40, start=0, country: str = "US"):
       %s
     }
   }
-}""" % (max(1, min(40, count)), country, max(0, start), fields)
+}"""
+    # Same reason as above: these are GraphQL templates, not log messages.
+    query = query_tpl % (max(1, min(40, count)), country, max(0, start), fields)  # noqa: UP031
     body = json.dumps({"query": query}).encode()
     req = urllib.request.Request("https://store.epicgames.com/graphql", data=body, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
