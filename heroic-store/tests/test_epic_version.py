@@ -10,7 +10,6 @@ Uso: python3 -m unittest tests.test_epic_version
 import importlib.machinery
 import importlib.util
 import json
-import os
 import unittest
 from pathlib import Path
 
