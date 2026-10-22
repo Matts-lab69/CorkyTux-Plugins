@@ -1058,7 +1058,9 @@ def cmd_game_info(args):
         die(4, "GOG not logged in.")
     # I give game-info 6 s of network budget total (5 s per call).
     t0 = time.monotonic()
-    budget = lambda: max(0.01, min(5.0, 6.0 - (time.monotonic() - t0)))
+
+    def budget():
+        return max(0.01, min(5.0, 6.0 - (time.monotonic() - t0)))
     try:
         import urllib.request
         req = urllib.request.Request(
