@@ -494,7 +494,7 @@ def extract_dll_names(file_path):
                     s = match.group(0).decode('ascii').strip().lower()
                     if re.match(r'^[a-z0-9_\-\.]+\.dll$', s):
                         dlls.add(s)
-                except:
+                except Exception:
                     pass
             return dlls
 
