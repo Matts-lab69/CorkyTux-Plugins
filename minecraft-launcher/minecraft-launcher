@@ -602,20 +602,20 @@ def _cmd_loader_versions_batch(wanted, mc_version):
     results = {}
     errors = {}
 
-    def run(l):
+    def run(loader_name):
         try:
-            return l, _probe_loader(l, mc_version), None
+            return loader_name, _probe_loader(loader_name, mc_version), None
         except Exception as e:
-            return l, None, str(e)
+            return loader_name, None, str(e)
 
     with ThreadPoolExecutor(max_workers=min(4, len(wanted))) as ex:
-        for l, res, err in ex.map(run, wanted):
+        for loader_name, res, err in ex.map(run, wanted):
             if err is not None:
-                errors[l] = err
+                errors[loader_name] = err
             else:
-                results[l] = res
+                results[loader_name] = res
     emit({"type": "done", "ok": True, "mc_version": mc_version,
-          "loaders": [results[l] for l in wanted if l in results],
+          "loaders": [results[loader_name] for loader_name in wanted if loader_name in results],
           "errors": errors})
 
 
@@ -627,9 +627,9 @@ def cmd_loader_versions(args):
         wanted = [x.strip() for x in loaders_arg.split(",") if x.strip()]
         if not wanted:
             die(2, "--loaders must list at least one loader")
-        for l in wanted:
-            if l not in LOADERS:
-                die(2, f"loader must be one of {LOADERS}: {l}")
+        for loader_name in wanted:
+            if loader_name not in LOADERS:
+                die(2, f"loader must be one of {LOADERS}: {loader_name}")
         _cmd_loader_versions_batch(wanted, args.mc_version)
         return
     if not loader:
@@ -2149,7 +2149,7 @@ def _cf_pack_loader(manifest: dict):
     """(loader, loader_version, mc_version) from a CF manifest."""
     mc = (((manifest.get("minecraft") or {}).get("version")) or "").strip()
     loaders = ((manifest.get("minecraft") or {}).get("modLoaders") or [])
-    primary = next((l for l in loaders if l.get("primary")), loaders[0] if loaders else None)
+    primary = next((entry for entry in loaders if entry.get("primary")), loaders[0] if loaders else None)
     raw = str((primary or {}).get("id", "") or "").strip().lower()
     loader, lver = "", ""
     for name in ("neoforge", "forge", "fabric", "quilt"):
