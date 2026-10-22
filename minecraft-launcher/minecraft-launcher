@@ -1362,9 +1362,39 @@ def _save_accounts(accounts):
     _write_private_json(ACCOUNTS_FILE, accounts)
 
 
+def _read_password_from_stdin() -> str:
+    """Read the password from stdin.
+
+    The launcher writes it and closes the pipe. I never print it, never
+    save it and never put it in an error message.
+    """
+    try:
+        data = sys.stdin.readline()
+    except Exception:
+        data = ""
+    return (data or "").rstrip("\r\n")
+
+
 def cmd_ely_auth(args):
     username = (args.username or "").strip()
-    password = (args.password or "")
+    if getattr(args, "probe", False):
+        # The launcher asks before it sends anything: it has to know that
+        # this plugin reads the password from stdin. An old plugin answers
+        # "Unknown command" and the launcher refuses to use the command
+        # line for the password.
+        emit({"type": "done", "ok": True, "password_stdin": True})
+        return
+    if getattr(args, "password_stdin", False):
+        # The password arrives on stdin. It is never in the argv, so it does
+        # not show up in `ps` and nobody can read it from /proc.
+        password = _read_password_from_stdin()
+    else:
+        password = args.password or ""
+        if password:
+            # The command line is visible to every local user. I do not
+            # accept the password there: the launcher sends it on stdin.
+            die(2, "the password must arrive on stdin (--password-stdin): "
+                   "the command line is visible to every local user")
     if not username or not password:
         die(2, "username and password required")
     import uuid as _ulib
@@ -1375,6 +1405,8 @@ def cmd_ely_auth(args):
         "clientToken": client_token,
         "requestUser": True,
     })
+    # The password is not needed anymore.
+    password = ""
     if status != 200 or not isinstance(payload, dict) or "accessToken" not in payload:
         die(4, _ely_error(status, payload))
     profile = payload.get("selectedProfile") or {}
@@ -2756,7 +2788,9 @@ def main():
 
     p_eauth = sub.add_parser("ely-auth")
     p_eauth.add_argument("--username", required=True)
-    p_eauth.add_argument("--password", required=True)
+    p_eauth.add_argument("--password", default="")
+    p_eauth.add_argument("--password-stdin", action="store_true")
+    p_eauth.add_argument("--probe", action="store_true")
     p_eauth.set_defaults(func=cmd_ely_auth)
 
     p_eref = sub.add_parser("ely-refresh")
