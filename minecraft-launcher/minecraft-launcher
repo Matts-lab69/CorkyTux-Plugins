@@ -26,7 +26,6 @@ import stat
 import subprocess
 import sys
 import time
-import uuid as uuidlib
 from pathlib import Path
 
 import requests
@@ -1122,7 +1121,6 @@ def cmd_java_detect(args):
 
 def cmd_java_install(args):
     import shutil as _sh
-    import subprocess as sp
     import tarfile
     import urllib.request
 
@@ -1709,8 +1707,8 @@ ADDON_DIRS = {
 
 
 def _mr_get(path: str, params: dict = None):
-    import urllib.request
     import urllib.parse
+    import urllib.request
     url = MODRINTH_API + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -1915,9 +1913,9 @@ def cmd_curse_auth_config(args):
 
 
 def cmd_curse_test(args):
-    import urllib.request
-    import urllib.parse
     import urllib.error
+    import urllib.parse
+    import urllib.request
     key = _cf_key()
     req = urllib.request.Request(CF_API + "/games/432", headers={
         "x-api-key": key,
@@ -1955,9 +1953,9 @@ def _cf_key() -> str:
 
 
 def _cf_get(path: str, params: dict = None):
-    import urllib.request
-    import urllib.parse
     import urllib.error
+    import urllib.parse
+    import urllib.request
     url = CF_API + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
