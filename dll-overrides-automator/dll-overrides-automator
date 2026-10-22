@@ -74,7 +74,7 @@ def write_ini(cp, path):
 
 def scan(game_dir):
     if not os.path.isdir(game_dir):
-        err("not a directory: %s" % game_dir)
+        err(f"not a directory: {game_dir}")
     files = [p for p in walk_files(game_dir)
              if DLL_SCAN.match(os.path.basename(p))]
     overrides = []
@@ -90,7 +90,7 @@ def scan(game_dir):
         # mirrors Java: substring check on the whole built string (case-insensitive)
         if base.lower() not in seen_blob.lower():
             seen_blob += base.lower()
-            overrides.append("%s%s;" % (base, suffix))
+            overrides.append(f"{base}{suffix};")
 
     for path in files:
         fname = os.path.basename(path)
@@ -100,7 +100,7 @@ def scan(game_dir):
                 with open(path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
             except OSError as e:
-                warnings.append("cannot read %s: %s" % (path, e))
+                warnings.append(f"cannot read {path}: {e}")
                 continue
             for line in content.split("\n"):
                 t = line.strip()
@@ -144,7 +144,7 @@ def scan(game_dir):
                 if changed:
                     write_ini(cp, path)
             except Exception as e:  # configparser.Error etc.
-                warnings.append("cannot parse ini %s: %s" % (path, e))
+                warnings.append(f"cannot parse ini {path}: {e}")
             continue
         # c) steamfix*.dll (find): remember parent dir
         if STEAMFIX_RE.search(fname):
@@ -194,7 +194,7 @@ def scan(game_dir):
                             os.symlink(src, dst)
                             patched_files.append(dst + " [symlink]")
                         except OSError as e:
-                            warnings.append("symlink failed %s: %s" % (dst, e))
+                            warnings.append(f"symlink failed {dst}: {e}")
             continue
         # e) default dll handling
         base = fname[:fname.rfind(".")].lower() if "." in fname else fname.lower()
@@ -233,10 +233,10 @@ def vendor_dll(dll_path):
 
 def cmd_patch(fixdir):
     if not os.path.isdir(fixdir):
-        err("not a directory: %s" % fixdir)
+        err(f"not a directory: {fixdir}")
     dlls = find_steamfix_dlls(fixdir)
     if not dlls:
-        print(json.dumps({"ok": False, "error": "no steamfix dlls in %s" % fixdir}))
+        print(json.dumps({"ok": False, "error": f"no steamfix dlls in {fixdir}"}))
         sys.exit(2)
     patched, failed = [], []
     for dll in dlls:
@@ -250,7 +250,7 @@ def cmd_patch(fixdir):
             shutil.copy2(src, dll)
             patched.append(dll)
         except OSError as e:
-            failed.append("%s: %s" % (dll, e))
+            failed.append(f"{dll}: {e}")
             try:  # restore backup on failure (mirrors Java)
                 if os.path.isfile(backup):
                     os.replace(backup, dll)
@@ -263,7 +263,7 @@ def cmd_patch(fixdir):
 
 def cmd_unpatch(fixdir):
     if not os.path.isdir(fixdir):
-        err("not a directory: %s" % fixdir)
+        err(f"not a directory: {fixdir}")
     restored, missing = [], []
     for fn in sorted(os.listdir(fixdir)):
         if not fn.endswith(BACKUP_SUFFIX):
@@ -280,14 +280,14 @@ def cmd_unpatch(fixdir):
             else:
                 missing.append(fn)
         except OSError as e:
-            missing.append("%s: %s" % (fn, e))
+            missing.append(f"{fn}: {e}")
     print(json.dumps({"ok": True, "restored": restored, "missing": missing}))
     return 0
 
 
 def cmd_status(fixdir):
     if not os.path.isdir(fixdir):
-        err("not a directory: %s" % fixdir)
+        err(f"not a directory: {fixdir}")
     dlls = find_steamfix_dlls(fixdir)
     backups = sorted(os.path.join(fixdir, fn) for fn in os.listdir(fixdir)
                      if fn.endswith(BACKUP_SUFFIX) and os.path.isfile(os.path.join(fixdir, fn)))
@@ -348,7 +348,7 @@ def cmd_install(args):
     try:
         os.makedirs(ns.prefix, exist_ok=True)
     except OSError as e:
-        print(json.dumps({"ok": False, "error": "cannot create prefix: %s" % e}))
+        print(json.dumps({"ok": False, "error": f"cannot create prefix: {e}"}))
         return 3
     env = dict(os.environ)
     env["STEAM_COMPAT_DATA_PATH"] = ns.prefix
@@ -357,7 +357,7 @@ def cmd_install(args):
     winpath = to_windows_path(ns.installdir)
     for installer in ns.installers:
         if not os.path.isfile(installer):
-            print(json.dumps({"ok": False, "error": "installer not found: %s" % installer}))
+            print(json.dumps({"ok": False, "error": f"installer not found: {installer}"}))
             return 3
         workdir = os.path.dirname(os.path.abspath(installer)) or "."
         cmd = [proton, "run", installer, "/DIR=" + winpath, "/TASKS=", "/SILENT"]
@@ -365,14 +365,14 @@ def cmd_install(args):
             proc = subprocess.run(cmd, cwd=workdir, env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as e:
-            print(json.dumps({"ok": False, "error": "cannot start installer: %s" % e}))
+            print(json.dumps({"ok": False, "error": f"cannot start installer: {e}"}))
             return 3
         if proc.returncode != 0:
             try:
                 shutil.rmtree(ns.prefix, ignore_errors=False)
             except OSError:
                 pass
-            print(json.dumps({"ok": False, "error": "installer exit %d" % proc.returncode,
+            print(json.dumps({"ok": False, "error": f"installer exit {proc.returncode}",
                               "installer": installer}))
             return 3
     # --clean semantics (remove installer leftovers) mirror cleanAfterAdd flag plumbing
