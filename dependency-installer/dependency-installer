@@ -582,7 +582,7 @@ def scan_game(game_dir, prefix=None, proton_path=None):
                     has_dotnet = True
             # Also check deeper for MonoBleedingEdge
             if not has_mono:
-                for root, dirs, files in os.walk(game_dir):
+                for _root, _dirs, files in os.walk(game_dir):
                     for f in files:
                         if f.lower() in ('mono-2.0-bdwgc.dll', 'mono.dll'):
                             has_mono = True

@@ -492,7 +492,7 @@ def register_game(emulator_name, game_dir):
                     except ValueError:
                         pass
 
-        for key, val in iso_paths.items():
+        for _key, val in iso_paths.items():
             if val == game_dir:
                 return {"ok": True, "message": "Game directory already registered in Dolphin"}
 
