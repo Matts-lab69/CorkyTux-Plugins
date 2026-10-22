@@ -912,7 +912,6 @@ def cmd_instance_delete(args):
         _sh.rmtree(vdir, ignore_errors=False)
     except OSError as e:
         die(3, f"delete failed: {e}")
-    lib = mc_dir / "libraries"
     emit({"type": "done", "ok": True, "deleted": vid, "mc_dir": str(mc_dir)})
 
 
@@ -2204,7 +2203,6 @@ def cmd_cf_modpack_install(args):
                    if f.get("required", True)]
         mods_dir = dest_base / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
-        total = len(entries)
         import concurrent.futures as _cfu
         import threading as _th
 
