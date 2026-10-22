@@ -11,7 +11,6 @@ Uso: python3 tests/test_install_legacy.py (stdlib, sin red).
 """
 import importlib.machinery
 import importlib.util
-import sys
 import types
 import unittest
 

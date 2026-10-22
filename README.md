@@ -46,7 +46,7 @@ CorkyTux Plugins is a collection of **official plugins** that extend the capabil
 
 ### 1. Dependency Installer
 
-**Version:** 2.1.0 | **Capabilities:** `scan`, `install`
+**Version:** 2.1.3 | **Capabilities:** `scan`, `install`
 
 Smart dependency detection for Windows games running via Proton/Wine.
 
@@ -152,7 +152,7 @@ emulator-manager corky-install Dolphin
 emulator-manager corky-link Dolphin /usr/bin/dolphin-emu
 
 # Link with custom launch args
-emulator-manager corky-link PCSX2 /usr/bin/pcsx2 "\-nofs -fullscreen {rom}"
+emulator-manager corky-link PCSX2 /usr/bin/pcsx2 "-nofs -fullscreen {rom}"
 
 # Link a Flatpak emulator
 emulator-manager corky-link Dolphin /usr/bin/flatpak "run org.DolphinEmu.dolphin-emu -e {rom}"
@@ -168,7 +168,7 @@ emulator-manager corky-unlink Dolphin
 
 ### 4. Minecraft Launcher
 
-**Version:** 1.0.0 | **Type:** `Minecraft` | Streaming JSON-lines
+**Version:** 1.1.1 | **Type:** `Minecraft` | **Capabilities:** `auth`, `versions`, `install`, `loaders`, `launch`, `stop`, `status`, `setup`, `java`, `mods`, `modrinth` | Streaming JSON-lines
 
 Minecraft Java: offline / Microsoft / Ely.by accounts, Java 8/17/21/25
 auto-detect (`~/jdk`, `/opt/jvm`, `/usr/lib/jvm`, `update-alternatives`),
@@ -183,7 +183,7 @@ Requires: `python3` + `requests`, `minecraft_launcher_lib`, `psutil` —
 
 ### 5. Heroic Store (Epic/GOG)
 
-**Version:** 1.0.0 — Epic Games + GOG via own `legendary`/`gogdl`
+**Version:** 1.1.0 | **Type:** `Store` | **Capabilities:** `setup`, `auth`, `library`, `install`, `uninstall`, `launch-info`, `cleanup-stale`, `free-promos`, `epic-deals`, `gog-store-search`, `game-info` — Epic Games + GOG via own `legendary`/`gogdl`
 (`setup` downloads them to `plugins/heroic-store/bin/`).
 
 Embedded WebKit Epic login with auto-capture, GOG token auth, library with
@@ -196,7 +196,7 @@ covers, `heroic-scan` (own session + Heroic + `~/Games/Heroic` only), `eos-code`
 
 ### 6. AppImage Launcher
 
-**Version:** 1.0.0 | **Type:** `AppImage`
+**Version:** 1.1.0 | **Type:** `AppImage` | **Capabilities:** `scan`, `status`, `integrate`, `remove`, `run`, `icon`
 
 Run and manage `.AppImage` files: scan, integrate into `~/Applications`,
 launch detached.
@@ -205,7 +205,7 @@ launch detached.
 
 ### 7. RPG Maker Runtime
 
-**Version:** 2.0.0 | **Type:** `RpgMaker`
+**Version:** 2.3.0 | **Type:** `RpgMaker` | **Capabilities:** `scan`, `diagnose`, `status`, `install`, `run`, `cleanup`
 
 Run RPG Maker MV/MZ (NW.js) and 2000/2003 (EasyRPG) games via bundled
 `box-rpg` (`vendor/`): scan, diagnose, runtimes, launch.
@@ -229,22 +229,41 @@ Run RPG Maker MV/MZ (NW.js) and 2000/2003 (EasyRPG) games via bundled
 3. Restart CorkyTux Launcher
 4. Enable the plugin in Settings → Plugins
 
+The installed directory holds executable code and read-only assets. The plugin
+keeps mutable state under `~/.config/CorkyTux/plugins/<id>/`; do not put tokens,
+downloaded binaries or game data in the installed directory.
+
 ---
 
 ## Plugin Protocol
 
-All plugins communicate with CorkyTux via a simple **JSON protocol** over stdout.
+All plugins communicate with CorkyTux via a **JSON protocol** over stdout.
+
+This is the current, unversioned baseline (v0). A versioned v1 contract with
+`protocolVersion`, a JSON Schema, signed releases and capability negotiation is
+under design; until it lands, the rules below are the compatibility contract.
 
 ### Input
 
-Plugins receive arguments via command-line:
+Plugins receive arguments via the command line:
 ```bash
 ./plugin <command> [args...]
 ```
 
+Commands are plugin-specific and are listed in each plugin README. The launcher
+executes the installed entrypoint by absolute path; it does not invoke a shell.
+
 ### Output
 
-Plugins return a single JSON document on stdout:
+- stdout is protocol-only. Write diagnostics to stderr.
+- A plugin may emit zero or more JSON Lines progress events before exactly one
+  final result object.
+- `type` is `progress`, `done` or `error`.
+- `ok` is `true` on success and `false` on failure.
+- On failure, `message` is a short human-readable error and `code` is the
+  plugin-specific error code (optional but recommended).
+
+Single result:
 ```json
 {
   "ok": true,
@@ -254,13 +273,23 @@ Plugins return a single JSON document on stdout:
 }
 ```
 
+Streaming mode (Minecraft and long installs):
+```jsonl
+{"type":"progress","stage":"download","percent":42.0}
+{"ok":true,"type":"done","installed":["1.20.1"]}
+```
+
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success |
 | `2` | Usage error / invalid path |
-| `3` | Install failed |
+| `3` | Operation failed |
+| `4` | Authentication error (plugins that manage accounts) |
+| `5` | Missing backend or dependency |
+
+Plugins that use additional codes must document them in `plugin.json`.
 
 ---
 
@@ -279,28 +308,44 @@ my-plugin/
 
 ```json
 {
+  "id": "my-plugin",
   "name": "My Plugin",
   "version": "1.0.0",
   "entry": "my-plugin",
+  "type": "Tool",
   "description": "Description of what the plugin does",
   "capabilities": ["scan", "install"],
   "protocol": {
     "stdout": "single JSON document per invocation",
-    "exitCodes": { "0": "ok", "2": "usage error", "3": "install failed" }
-  }
+    "exitCodes": { "0": "ok", "2": "usage error", "3": "operation failed" }
+  },
+  "source": "Matts-lab69/CorkyTux-Plugins"
 }
 ```
+
+`id` must match the install directory. `entry` must be a relative file name
+inside that directory and must be executable. Current Launcher builds still
+dispatch known plugins by id, so changing `id` or `entry` is a breaking change
+until generic dispatch lands.
 
 ### Capabilities
 
 | Capability | Description |
 |------------|-------------|
 | `scan` | Can scan/analyze game directories |
-| `install` | Can install dependencies or components |
+| `install` | Can install dependencies, runtimes or components |
 | `patch` | Can apply patches to games |
 | `unpatch` | Can remove patches from games |
 | `status` | Can report current state |
+| `run` | Can launch a game or application |
+| `integrate` / `remove` | Can create or remove desktop integration |
+| `icon` | Can extract an application icon |
+| `diagnose` | Can explain missing runtimes or broken installs |
+| `cleanup` | Can remove caches or stale profiles |
 | `emulators` | Provides emulator management |
+| `auth` / `setup` | Can authenticate or bootstrap a backend |
+| `versions` / `launch` / `stop` | Can manage and run game versions |
+| `mods` / `modrinth` | Can manage mods from a catalog |
 
 ### Testing Locally
 
@@ -318,9 +363,17 @@ my-plugin/
 
 CorkyTux fetches available plugins from the GitHub releases of this repository. To publish a plugin:
 
-1. Create a release on GitHub
-2. Include the plugin executable and `plugin.json` in the release assets
-3. CorkyTux will automatically detect and list it in Settings → Plugins
+1. Create a release on GitHub.
+2. Upload one `.tar.gz` per supported architecture. The tarball must contain a
+   single top-level `<id>/` directory with the executable, `plugin.json`,
+   `README.md` and any runtime assets.
+3. CorkyTux discovers `.tar.gz` assets only; loose executables or a bare
+   `plugin.json` are ignored.
+
+The launcher extracts the archive under
+`~/.local/share/CorkyTux/plugins/<id>/`. The plugin's mutable state belongs in
+`~/.config/CorkyTux/plugins/<id>/`; never store tokens or downloads in the
+executable directory.
 
 ---
 
@@ -357,7 +410,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the **GNU Affero General Public License v3.0** — see the [LICENSE](../LICENSE) file for details.
+This project is licensed under the **GNU Affero General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
 
 ---
 

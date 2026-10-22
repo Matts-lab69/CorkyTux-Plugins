@@ -34,10 +34,11 @@ runtime locations and prints an `md5sum` so the three copies must match:
 
 ## First step: `setup` (required once)
 
-The plugin downloads its own `legendary` / `gogdl` to:
+The plugin downloads its own `legendary` / `gogdl` to its mutable-state
+directory:
 
 ```text
-~/.local/share/CorkyTux/plugins/heroic-store/bin/
+~/.config/CorkyTux/plugins/heroic-store/bin/
 ```
 
 - From the UI it runs automatically the first time.
@@ -75,7 +76,8 @@ Terminal fallback (if the embedded window fails):
 ```bash
 ./heroic-store login-window --store gog
 ./heroic-store auth --store gog --code YOUR_CODE
-./heroic-store logout    # closes the current session
+./heroic-store logout --store gog    # closes the GOG session
+./heroic-store logout --store epic   # closes the Epic session
 ```
 
 ## Library, promos and deals

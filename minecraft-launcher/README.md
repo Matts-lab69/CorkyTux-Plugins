@@ -17,7 +17,7 @@ The plugin detects Java in `~/jdk`, `/opt/jvm`, `/usr/lib/jvm` and
 ```bash
 ./minecraft-launcher java-detect
 ./minecraft-launcher java-required --version 1.20.1  # which Java that version needs
-./minecraft-launcher manifest-java
+./minecraft-launcher manifest-java --mc-version 1.20.1
 ```
 
 ## Accounts
@@ -26,45 +26,53 @@ The plugin detects Java in `~/jdk`, `/opt/jvm`, `/usr/lib/jvm` and
 |------|----|----------|
 | Offline (any name) | Header > account | `./minecraft-launcher offline --name Steve` |
 | Microsoft | Header > account (Azure: placeholder, partial flow) | `./minecraft-launcher auth ...` |
-| Ely.by | Header > account | `./minecraft-launcher ely-auth --login USER --password PASS` |
+| Ely.by | Header > account | `./minecraft-launcher ely-auth --username USER --password PASS` |
 
 Management:
 
 ```bash
-./minecraft-launcher auth-config       # show current account
-./minecraft-launcher unaccount         # log out
-./minecraft-launcher ely-refresh       # refresh Ely.by token
-./minecraft-launcher ely-validate      # validate session
-./minecraft-launcher ely-skin --show   # show skin
+./minecraft-launcher auth-config --show          # show current account
+./minecraft-launcher unaccount --account ID      # log out one account
+./minecraft-launcher ely-refresh --account ID    # refresh Ely.by token
+./minecraft-launcher ely-validate --account ID   # validate session
+./minecraft-launcher ely-skin --name USER        # show skin
 ```
+
+`ID` is the `account_id` returned by `offline`, `auth` or `ely-auth`.
 
 ## Versions and instances
 
 ```bash
-./minecraft-launcher versions          # available versions
-./minecraft-launcher install --version 1.20.1   # installs the client
-./minecraft-launcher loader-versions --loader fabric --mc 1.20.1
+./minecraft-launcher versions                       # available versions
+./minecraft-launcher install --version 1.20.1       # installs the client
+./minecraft-launcher loader-versions --loader fabric --mc-version 1.20.1
 ```
 
 In the UI: **ADD INSTANCE** (Custom / Modpack / Import) with a Modrinth/CurseForge
 dropdown, Library tiles + detail (Overview / Addons / Logs / Settings).
 An empty `installed_versions` at first is **normal**.
 
+The CLI addresses an instance with `--mc-dir PATH` (the instance directory), not
+with an instance name. Use the path shown in the instance settings.
+
 ## Mods: Modrinth
 
 Browse with multi-select + queue + progress (tile size + preview + Compact under Appearance):
 
 ```bash
-./minecraft-launcher mod-search --query sodium --mc 1.20.1
-./minecraft-launcher mod-versions --project-ID --mc 1.20.1
-./minecraft-launcher mod-install --project-ID --version-ID --instance MY_ENV
-./minecraft-launcher mods-list --instance MY_ENV
-./minecraft-launcher mod-toggle --instance MY_ENV --mod sodium --off
-./minecraft-launcher mod-check-updates --instance MY_ENV
-./minecraft-launcher mod-update --instance MY_ENV --all
-./minecraft-launcher modpack-install --pack-ID --version-ID
-./minecraft-launcher modpack-import --file pack.mrpack
+./minecraft-launcher mod-search --query sodium --mc-version 1.20.1
+./minecraft-launcher mod-versions --project-id PROJECT_ID --mc-version 1.20.1
+./minecraft-launcher mod-install --project-id PROJECT_ID --version-id VERSION_ID --mc-dir PATH
+./minecraft-launcher mods-list
+./minecraft-launcher mod-toggle --file PATH
+./minecraft-launcher mod-check-updates --mc-dir PATH
+./minecraft-launcher mod-update --file PATH
+./minecraft-launcher modpack-install --project-id PROJECT_ID --version-id VERSION_ID
+./minecraft-launcher modpack-import --path pack.mrpack
 ```
+
+Replace `PROJECT_ID`, `VERSION_ID` and `PATH` with real values. The uppercase
+forms in the old examples were placeholders, not literal arguments.
 
 ## Mods: CurseForge
 
@@ -72,16 +80,16 @@ Uses the **integrated public key** (the user's personal key errored — don't us
 
 ```bash
 ./minecraft-launcher curse-test
-./minecraft-launcher cf-search --query jei --mc 1.20.1
-./minecraft-launcher cf-versions --project-ID --mc 1.20.1
-./minecraft-launcher cf-install --project-ID --file-ID --instance MY_ENV
-./minecraft-launcher cf-modpack-install --project-ID --file-ID
+./minecraft-launcher cf-search --query jei --mc-version 1.20.1
+./minecraft-launcher cf-versions --mod-id MOD_ID --mc-version 1.20.1
+./minecraft-launcher cf-install --mod-id MOD_ID --file-id FILE_ID --mc-dir PATH
+./minecraft-launcher cf-modpack-install --pack-id PACK_ID --file-id FILE_ID
 ```
 
 ## Play
 
 ```bash
-./minecraft-launcher launch --instance MY_ENV
+./minecraft-launcher launch --version 1.20.1 [--account ID]
 ./minecraft-launcher status            # state / playing
 ./minecraft-launcher stop              # stop
 ./minecraft-launcher setup             # first-time setup

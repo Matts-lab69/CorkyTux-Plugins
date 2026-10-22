@@ -11,7 +11,6 @@ Uso: python3 tests/test_loader_versions.py (stdlib, sin red).
 """
 import importlib.machinery
 import importlib.util
-import sys
 import types
 import unittest
 
@@ -51,7 +50,7 @@ class LoaderVersionsTests(unittest.TestCase):
     def setUpClass(cls):
         cls.m = load()
         cls.m.mll = types.SimpleNamespace(
-            mod_loader=types.SimpleNamespace(get_mod_loader=lambda l: cls.loaders[l]))
+            mod_loader=types.SimpleNamespace(get_mod_loader=lambda loader: cls.loaders[loader]))
         cls.m.emit = lambda ev: cls.events.append(ev)
         cls.loaders = {}
 
@@ -84,7 +83,7 @@ class BatchTests(LoaderVersionsTests):
         doc = self.events[0]
         self.assertTrue(doc["ok"])
         self.assertEqual(doc["mc_version"], "26.3")
-        names = [l["loader"] for l in doc["loaders"]]
+        names = [loader["loader"] for loader in doc["loaders"]]
         self.assertEqual(names, ["fabric", "neoforge"],
                          "orden pedido preservado; el que explota va a errors")
         fabric = doc["loaders"][0]
