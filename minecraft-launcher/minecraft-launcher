@@ -2787,7 +2787,10 @@ def main():
     p_jreq.set_defaults(func=cmd_java_required)
 
     p_eauth = sub.add_parser("ely-auth")
-    p_eauth.add_argument("--username", required=True)
+    # The probe has no account: the launcher asks for the capability before
+    # it has anything to send. The username is required for a real sign-in,
+    # and cmd_ely_auth refuses without it.
+    p_eauth.add_argument("--username", default="")
     p_eauth.add_argument("--password", default="")
     p_eauth.add_argument("--password-stdin", action="store_true")
     p_eauth.add_argument("--probe", action="store_true")

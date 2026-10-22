@@ -105,5 +105,44 @@ class ElyPasswordTests(unittest.TestCase):
         self.assertNotIn(SECRET, out.getvalue())
 
 
+class ElyProbeCliTests(unittest.TestCase):
+    """The real parser has to accept the probe with no credentials.
+
+    The launcher calls `ely-auth --probe` before it has a username or a
+    password. A required --username turned that probe into a usage error,
+    and the launcher answered "the installed Ely.by plugin is too old" on a
+    plugin that was in fact new.
+    """
+
+    def _run(self, argv, stdin=""):
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), *argv],
+                input=stdin,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": home},
+                timeout=60,
+            )
+
+    def test_the_probe_runs_with_no_username(self):
+        proc = self._run(["ely-auth", "--probe"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue(doc.get("ok"), doc)
+        self.assertIs(doc.get("password_stdin"), True)
+
+    def test_a_sign_in_without_a_username_is_still_refused(self):
+        proc = self._run(["ely-auth", "--password-stdin"])
+        self.assertEqual(proc.returncode, 2)
+        doc = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(doc.get("type"), "error")
+        self.assertIn("username and password required", doc.get("message", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
