@@ -363,17 +363,40 @@ until generic dispatch lands.
 
 CorkyTux fetches available plugins from the GitHub releases of this repository. To publish a plugin:
 
-1. Create a release on GitHub.
-2. Upload one `.tar.gz` per supported architecture. The tarball must contain a
-   single top-level `<id>/` directory with the executable, `plugin.json`,
-   `README.md` and any runtime assets.
-3. CorkyTux discovers `.tar.gz` assets only; loose executables or a bare
+1. Bump `version` in `<id>/plugin.json` (and every place that quotes it).
+   A published tag cannot be reused, so the version has to move before a
+   fix can reach the registry.
+2. Build the tarball and its checksums from the repository root:
+
+   ```bash
+   tools/plugin-tarball.sh <id> dist
+   # dist/<id>-<version>.tar.gz and dist/checksums.txt
+   ```
+
+   The script reads `id`, `version` and `entry` from `<id>/plugin.json`,
+   refuses a mismatched id or a non-executable entry, and leaves out
+   `tests/`, caches and backups.
+3. Create the release with both assets:
+
+   ```bash
+   gh release create <id>-v<version> \
+     dist/<id>-<version>.tar.gz dist/checksums.txt \
+     --title "<Name> v<version>: <summary>" --notes "<notes>"
+   ```
+
+4. CorkyTux discovers `.tar.gz` assets only; loose executables or a bare
    `plugin.json` are ignored.
 
-The launcher extracts the archive under
-`~/.local/share/CorkyTux/plugins/<id>/`. The plugin's mutable state belongs in
+The tarball must contain a single top-level `<id>/` directory with the
+executable, `plugin.json`, `README.md` and any runtime assets. The launcher
+extracts the archive under `~/.local/share/CorkyTux/plugins/<id>/` and reads
+`plugin.json` there; the directory name and the `id` in the manifest have to
+agree. The plugin's mutable state belongs in
 `~/.config/CorkyTux/plugins/<id>/`; never store tokens or downloads in the
 executable directory.
+
+`checksums.txt` next to the tarball is for users who verify a download by
+hand and for the release audit. The launcher does not check it yet.
 
 ---
 
