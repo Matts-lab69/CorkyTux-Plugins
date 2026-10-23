@@ -26,7 +26,6 @@ import stat
 import subprocess
 import sys
 import time
-import uuid as uuidlib
 from pathlib import Path
 
 import requests
@@ -603,20 +602,20 @@ def _cmd_loader_versions_batch(wanted, mc_version):
     results = {}
     errors = {}
 
-    def run(l):
+    def run(loader_name):
         try:
-            return l, _probe_loader(l, mc_version), None
+            return loader_name, _probe_loader(loader_name, mc_version), None
         except Exception as e:
-            return l, None, str(e)
+            return loader_name, None, str(e)
 
     with ThreadPoolExecutor(max_workers=min(4, len(wanted))) as ex:
-        for l, res, err in ex.map(run, wanted):
+        for loader_name, res, err in ex.map(run, wanted):
             if err is not None:
-                errors[l] = err
+                errors[loader_name] = err
             else:
-                results[l] = res
+                results[loader_name] = res
     emit({"type": "done", "ok": True, "mc_version": mc_version,
-          "loaders": [results[l] for l in wanted if l in results],
+          "loaders": [results[loader_name] for loader_name in wanted if loader_name in results],
           "errors": errors})
 
 
@@ -628,9 +627,9 @@ def cmd_loader_versions(args):
         wanted = [x.strip() for x in loaders_arg.split(",") if x.strip()]
         if not wanted:
             die(2, "--loaders must list at least one loader")
-        for l in wanted:
-            if l not in LOADERS:
-                die(2, f"loader must be one of {LOADERS}: {l}")
+        for loader_name in wanted:
+            if loader_name not in LOADERS:
+                die(2, f"loader must be one of {LOADERS}: {loader_name}")
         _cmd_loader_versions_batch(wanted, args.mc_version)
         return
     if not loader:
@@ -913,7 +912,6 @@ def cmd_instance_delete(args):
         _sh.rmtree(vdir, ignore_errors=False)
     except OSError as e:
         die(3, f"delete failed: {e}")
-    lib = mc_dir / "libraries"
     emit({"type": "done", "ok": True, "deleted": vid, "mc_dir": str(mc_dir)})
 
 
@@ -1122,7 +1120,6 @@ def cmd_java_detect(args):
 
 def cmd_java_install(args):
     import shutil as _sh
-    import subprocess as sp
     import tarfile
     import urllib.request
 
@@ -1709,8 +1706,8 @@ ADDON_DIRS = {
 
 
 def _mr_get(path: str, params: dict = None):
-    import urllib.request
     import urllib.parse
+    import urllib.request
     url = MODRINTH_API + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -1915,9 +1912,9 @@ def cmd_curse_auth_config(args):
 
 
 def cmd_curse_test(args):
-    import urllib.request
-    import urllib.parse
     import urllib.error
+    import urllib.parse
+    import urllib.request
     key = _cf_key()
     req = urllib.request.Request(CF_API + "/games/432", headers={
         "x-api-key": key,
@@ -1955,9 +1952,9 @@ def _cf_key() -> str:
 
 
 def _cf_get(path: str, params: dict = None):
-    import urllib.request
-    import urllib.parse
     import urllib.error
+    import urllib.parse
+    import urllib.request
     url = CF_API + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -2151,7 +2148,7 @@ def _cf_pack_loader(manifest: dict):
     """(loader, loader_version, mc_version) from a CF manifest."""
     mc = (((manifest.get("minecraft") or {}).get("version")) or "").strip()
     loaders = ((manifest.get("minecraft") or {}).get("modLoaders") or [])
-    primary = next((l for l in loaders if l.get("primary")), loaders[0] if loaders else None)
+    primary = next((entry for entry in loaders if entry.get("primary")), loaders[0] if loaders else None)
     raw = str((primary or {}).get("id", "") or "").strip().lower()
     loader, lver = "", ""
     for name in ("neoforge", "forge", "fabric", "quilt"):
@@ -2206,7 +2203,6 @@ def cmd_cf_modpack_install(args):
                    if f.get("required", True)]
         mods_dir = dest_base / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
-        total = len(entries)
         import concurrent.futures as _cfu
         import threading as _th
 

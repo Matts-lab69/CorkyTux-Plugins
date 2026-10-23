@@ -63,7 +63,6 @@ WINE_PROVIDES = {
     'mlang.dll', 'mshtml.dll', 'msxml*.dll',
     # Windows Media (Wine provides its own; never winetricks these)
     'wmvcore.dll',
-    'winex11.drv', 'winevulkan.dll',
     'vulkan-1.dll',
     # API set DLLs (Windows API redirection)
     'api-ms-win-core-*.dll', 'api-ms-win-downlevel-*.dll',
@@ -494,7 +493,7 @@ def extract_dll_names(file_path):
                     s = match.group(0).decode('ascii').strip().lower()
                     if re.match(r'^[a-z0-9_\-\.]+\.dll$', s):
                         dlls.add(s)
-                except:
+                except Exception:
                     pass
             return dlls
 
@@ -582,7 +581,7 @@ def scan_game(game_dir, prefix=None, proton_path=None):
                     has_dotnet = True
             # Also check deeper for MonoBleedingEdge
             if not has_mono:
-                for root, dirs, files in os.walk(game_dir):
+                for _root, _dirs, files in os.walk(game_dir):
                     for f in files:
                         if f.lower() in ('mono-2.0-bdwgc.dll', 'mono.dll'):
                             has_mono = True
