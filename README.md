@@ -46,7 +46,7 @@ CorkyTux Plugins is a collection of **official plugins** that extend the capabil
 
 ### 1. Dependency Installer
 
-**Version:** 2.1.3 | **Capabilities:** `scan`, `install`
+**Version:** 2.1.4 | **Capabilities:** `scan`, `install`
 
 Smart dependency detection for Windows games running via Proton/Wine.
 
