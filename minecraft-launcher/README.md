@@ -26,7 +26,7 @@ The plugin detects Java in `~/jdk`, `/opt/jvm`, `/usr/lib/jvm` and
 |------|----|----------|
 | Offline (any name) | Header > account | `./minecraft-launcher offline --name Steve` |
 | Microsoft | Header > account (Azure: placeholder, partial flow) | `./minecraft-launcher auth ...` |
-| Ely.by | Header > account | `./minecraft-launcher ely-auth --username USER --password PASS` |
+| Ely.by | Header > account | `./minecraft-launcher ely-auth --username USER --password-stdin` (the password arrives on stdin, never in the command line) |
 
 Management:
 
