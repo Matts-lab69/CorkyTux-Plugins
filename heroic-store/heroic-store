@@ -20,6 +20,16 @@ import webbrowser
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "CorkyTux" / "plugins" / "heroic-store"
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create plugin state 0700 and migrate an older 0755 directory."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        if not path.is_symlink() and path.is_dir():
+            os.chmod(path, 0o700)
+    except OSError:
+        pass
 # I keep gogdl in my own CONFIG_DIR (manifests included): I never reuse
 # Heroic's folders (~/.config/heroic_gogdl) so I don't collide when I also
 # have Heroic installed. This only affects the gogdl child process (auth
@@ -183,7 +193,7 @@ def _read_installs():
 
 
 def _write_installs(data: dict):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(CONFIG_DIR)
     _atomic_write_json(INSTALLS_JSON, json.dumps(data, indent=2))
 
 
@@ -210,7 +220,7 @@ def _gogdl_auth_file() -> str:
     with a traceback before it ever contacts GOG, and the login fails with a
     bare "rc=1" no matter how good the authorization code was. A missing file
     is fine (credentials_data stays {}); an empty one is not."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(CONFIG_DIR)
     try:
         if not GOGDL_AUTH_JSON.exists():
             # I use O_EXCL so a file appearing between exists() and open()
@@ -265,7 +275,7 @@ def _gogdl_store_entry(entry: dict, refresh_used: str = "") -> None:
     stored["loginTime"] = time.time()
     data[GOG_CLIENT_ID] = stored
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(CONFIG_DIR)
         _atomic_write_json(GOGDL_AUTH_JSON, json.dumps(data), mode=0o600)
         os.chmod(GOGDL_AUTH_JSON, 0o600)
     except OSError as e:
@@ -323,7 +333,7 @@ def _status_cache_get(max_age_s=60):
 def _status_cache_set(payload):
     try:
         import time as _t
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(CONFIG_DIR)
         STATUS_CACHE.write_text(json.dumps({"ts": _t.time(), "payload": payload}))
     except OSError:
         pass
@@ -601,7 +611,7 @@ NO_DESC_RETRY = 7 * 24 * 3600
 
 def _write_json(path: Path, data: dict):
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(CONFIG_DIR)
         path.write_text(json.dumps(data))
     except OSError:
         pass
@@ -609,7 +619,7 @@ def _write_json(path: Path, data: dict):
 
 def _write_json_atomic(path: Path, data: dict):
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(CONFIG_DIR)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False))
         os.replace(tmp, path)
@@ -758,7 +768,7 @@ def _steam_throttle():
             break
         _t.sleep(wait)
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(CONFIG_DIR)
         STEAM_THROTTLE_FILE.write_text(str(_t.time()))
     except OSError:
         pass
@@ -2002,7 +2012,7 @@ def cmd_cleanup_stale(args):
                f"nothing to clean.")
     _require_binary(LEGENDARY_BIN, "legendary")
     # Backup installed.json (only the 5 most recent survive).
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(CONFIG_DIR)
     import time as _t
     ts = _t.strftime("%Y%m%d-%H%M%S")
     shutil.copy2(LEGENDARY_INSTALLED, CONFIG_DIR / f"installed.json.bak-{ts}")
@@ -2433,6 +2443,17 @@ def _query_param(url: str, key: str) -> str:
 
 _LOG_FILE = CONFIG_DIR / "sso_debug.log"
 
+
+def _open_private_log(path: Path, truncate: bool = False):
+    _ensure_private_dir(path.parent)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if truncate else os.O_APPEND)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, "w" if truncate else "a")
+
 def _log_safe(msg: str) -> bool:
     """True when the line carries no credential/code material. Applied inside
     _dbg as a last-resort filter so even an accidental sensitive value never
@@ -2472,9 +2493,8 @@ def _dbg(msg):
         import time
         if not _log_safe(msg):
             return
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_LOG_FILE, "a") as f:
-            os.chmod(_LOG_FILE, 0o600)
+        _ensure_private_dir(CONFIG_DIR)
+        with _open_private_log(_LOG_FILE) as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception:
         pass
@@ -2497,9 +2517,8 @@ def cmd_login_window(args):
 
     # Clear previous debug log (config dir, 0600)
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_LOG_FILE, "w") as f:
-            os.chmod(_LOG_FILE, 0o600)
+        _ensure_private_dir(CONFIG_DIR)
+        with _open_private_log(_LOG_FILE, truncate=True) as f:
             f.write("")
     except Exception:
         pass
@@ -3628,5 +3647,5 @@ def main():
 
 
 if __name__ == "__main__":
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(CONFIG_DIR)
     main()
