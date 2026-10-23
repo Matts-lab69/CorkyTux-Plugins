@@ -61,6 +61,8 @@ WINE_PROVIDES = {
     'mswsock.dll', 'wsdapi.dll',
     'usp10.dll', 'gdiplus.dll', 'windowscodecs.dll',
     'mlang.dll', 'mshtml.dll', 'msxml*.dll',
+    # Windows Media (Wine provides its own; never winetricks these)
+    'wmvcore.dll',
     'winex11.drv', 'winevulkan.dll',
     'vulkan-1.dll',
     # API set DLLs (Windows API redirection)
@@ -77,6 +79,16 @@ DXVK_DLLS = {
 def is_dxvk_dll(dll_name):
     """Check if a DLL requires DXVK (Wine does not provide it)."""
     return dll_name.lower() in DXVK_DLLS
+
+
+# Media DLLs: a strings-level hit in a bundled DLL alone is weak evidence
+# (transitive imports are common). Only a hit in a top-level exe counts
+# as a strong signal; otherwise the dep is reported as optional.
+MEDIA_DLLS = {
+    'wmvcore.dll', 'wmpds.dll', 'wmp.dll', 'quartz.dll', 'qdv.dll',
+    'qdvd.dll', 'devenum.dll', 'qedit.dll', 'qasf.dll', 'wmasf.dll',
+    'wmvdecod.dll', 'wmvdspa.dll',
+}
 
 def is_wine_builtin(dll_name):
     """Check if a DLL is provided by Wine/Proton natively."""
@@ -348,12 +360,6 @@ DEPENDENCIES = [
         "must_import_pattern": [r'xactengine\d*\.dll'],
     },
     {
-        "id": "coreaudio",
-        "verb": "coreaudio",
-        "desc": "Core Audio (Windows Media support)",
-        "must_import": ['coreaudio.dll'],
-    },
-    {
         "id": "amstream",
         "verb": "amstream",
         "desc": "ActiveMovie Stream (media playback)",
@@ -371,12 +377,6 @@ DEPENDENCIES = [
         "desc": "DirectShow (media framework)",
         "must_import": ['quartz.dll'],
     },
-    {
-        "id": "wmvcore",
-        "verb": "wmvcore",
-        "desc": "Windows Media Video Core",
-        "must_import": ['wmvcore.dll', 'wmvds.dll'],
-    },
 
     # Physics
     {
@@ -389,7 +389,7 @@ DEPENDENCIES = [
     },
     {
         "id": "physx_legacy",
-        "verb": "physx_legacy",
+        "verb": "physx",
         "desc": "NVIDIA PhysX (legacy)",
         "must_import": ['physxloader.dll', 'physxcudart.dll'],
     },
@@ -397,14 +397,14 @@ DEPENDENCIES = [
     # Input
     {
         "id": "xinput",
-        "verb": "xinput1_3",
+        "verb": "xinput",
         "desc": "XInput Gamepad Library",
         "must_import": ['xinput1_3.dll'],
         "skip_if_wine": True,
     },
     {
         "id": "xinput9_1_0",
-        "verb": "xinput9_1_0",
+        "verb": "xinput",
         "desc": "XInput Gamepad (older)",
         "must_import": ['xinput9_1_0.dll'],
         "skip_if_wine": True,
@@ -538,9 +538,15 @@ def scan_game(game_dir, prefix=None, proton_path=None):
 
     # Step 1: Extract ALL DLL names referenced in game files
     all_dlls = set()
+    dll_files = {}
     for f in game_files:
-        dlls = extract_dll_names(f)
-        all_dlls.update(dlls)
+        for d in extract_dll_names(f):
+            all_dlls.add(d)
+            dll_files.setdefault(d, set()).add(f)
+    # Top-level exes: a media-DLL hit here is a strong signal, a hit in
+    # a bundled DLL alone is weak (transitive import).
+    top_exes = {f for f in game_files
+                if os.path.dirname(f) == game_dir and f.lower().endswith('.exe')}
 
     # Step 2: Separate Wine built-ins from external
     wine_dlls = set()
@@ -627,15 +633,26 @@ def scan_game(game_dir, prefix=None, proton_path=None):
                     "status": "installed",
                 })
             else:
+                media_only = (
+                    len(evidence) > 0
+                    and all(e in MEDIA_DLLS for e in evidence)
+                    and not any(
+                        f in top_exes
+                        for e in evidence
+                        for f in dll_files.get(e, ())
+                    )
+                )
                 detected.append({
                     "id": dep["id"],
                     "desc": dep["desc"],
-                    "confidence": "detected",
+                    "confidence": "low" if media_only else "detected",
+                    "status": "optional" if media_only else "missing",
                     "evidence": evidence[:3],
                 })
 
     # Summary
-    needs_install = [d for d in detected if d.get("status") != "installed"]
+    needs_install = [d for d in detected
+                     if d.get("status") not in ("installed", "optional")]
 
     if not detected:
         json.dump({
@@ -760,6 +777,35 @@ def find_wine(proton_path=None):
     return None
 
 
+def check_verbs(proton_path=None):
+    """Report every mapped verb and whether the configured winetricks
+    provides it (load_<verb> function). Catches dead mappings early."""
+    verbs = sorted({d["verb"] for d in DEPENDENCIES if d.get("verb")})
+    available = set()
+    wt = find_winetricks(proton_path)
+    if wt:
+        try:
+            with open(wt, errors='replace') as f:
+                available = set(re.findall(r'load_([a-z0-9_]+)\(\)', f.read()))
+        except OSError:
+            pass
+    rows = [{"verb": v, "ok": v in available} for v in verbs]
+    missing = [v for v in verbs if v not in available]
+    json.dump({"ok": not missing, "winetricks": wt,
+               "verbs": rows, "missing": missing}, sys.stdout)
+
+
+def dep_error(proc, limit=2000):
+    """stderr plus stdout tail (bounded): clues often land on stdout."""
+    err = (proc.stderr or "").strip()
+    out = (proc.stdout or "").strip()
+    if out:
+        err = (err + "\n[stdout tail:]\n" + out).strip() if err else out
+    if len(err) > limit:
+        err = "..." + err[-limit:]
+    return err or None
+
+
 def emit_progress(dep_id, desc, status, error=None):
     json.dump({"type": "progress", "id": dep_id, "desc": desc, "status": status, "error": error}, sys.stdout)
     sys.stdout.write("\n")
@@ -776,9 +822,14 @@ def install_deps(prefix, deps, proton_path=None):
         json.dump({"ok": False, "error": "winetricks not found"}, sys.stdout)
         sys.exit(2)
 
+    if not shutil.which("cabextract"):
+        json.dump({"ok": False, "error": "cabextract not found (needed to unpack Windows components)"}, sys.stdout)
+        sys.exit(2)
+
     wine = find_wine(proton_path)
     results = []
     failed = []
+    done_verbs = set()
 
     for dep_id in deps:
         dep_def = None
@@ -791,6 +842,12 @@ def install_deps(prefix, deps, proton_path=None):
             results.append({"id": dep_id, "ok": False, "error": "Unknown dependency"})
             failed.append(dep_id)
             emit_progress(dep_id, dep_id, "error", "Unknown dependency")
+            continue
+
+        if dep_def["verb"] in done_verbs:
+            results.append({"id": dep_id, "desc": dep_def["desc"], "ok": True,
+                            "code": 0, "note": "verb already run in this batch"})
+            emit_progress(dep_id, dep_def["desc"], "done")
             continue
 
         emit_progress(dep_id, dep_def["desc"], "installing")
@@ -814,8 +871,10 @@ def install_deps(prefix, deps, proton_path=None):
                 timeout=300,
             )
             ok = proc.returncode == 0
+            done_verbs.add(dep_def["verb"])
             results.append({"id": dep_id, "desc": dep_def["desc"], "ok": ok,
-                           "error": proc.stderr.strip() if not ok else None})
+                           "code": proc.returncode,
+                           "error": dep_error(proc) if not ok else None})
             if ok:
                 emit_progress(dep_id, dep_def["desc"], "done")
             else:
@@ -894,6 +953,17 @@ def main():
             json.dump({"ok": False, "error": "At least one dependency ID is required"}, sys.stdout)
             sys.exit(2)
         install_deps(prefix, deps, proton_path)
+
+    elif cmd == "check-verbs":
+        proton_path = None
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--proton" and i + 1 < len(sys.argv):
+                proton_path = sys.argv[i + 1]
+                i += 2
+            else:
+                i += 1
+        check_verbs(proton_path)
 
     else:
         json.dump({"ok": False, "error": f"Unknown command: {cmd}"}, sys.stdout)
