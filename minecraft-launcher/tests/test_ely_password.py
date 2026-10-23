@@ -119,14 +119,26 @@ class ElyProbeCliTests(unittest.TestCase):
         import subprocess
         import tempfile
 
+        # Exactly what the launcher does: the entrypoint itself (shebang and
+        # all) with the same argv, and only the variables plugin_process
+        # keeps (PLUGIN_ENV_ALLOWLIST in the launcher's plugin_process.rs).
         with tempfile.TemporaryDirectory() as home:
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "HOME": home,
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+                "TMPDIR": home,
+            }
+            # No payload means the probe path: /dev/null, as plugin_process
+            # does, not an empty pipe.
+            extra = {"input": stdin} if stdin else {"stdin": subprocess.DEVNULL}
             return subprocess.run(
-                [sys.executable, str(SCRIPT), *argv],
-                input=stdin,
+                [str(SCRIPT), *argv],
                 capture_output=True,
                 text=True,
-                env={**os.environ, "HOME": home},
+                env=env,
                 timeout=60,
+                **extra,
             )
 
     def test_the_probe_runs_with_no_username(self):
