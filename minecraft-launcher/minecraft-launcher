@@ -1128,7 +1128,7 @@ def cmd_java_install(args):
         die(2, f"version must be one of {JAVA_VERSIONS}")
     dest = JAVA_DIR / ver
     emit({"type": "progress", "stage": f"downloading-java-{ver}", "percent": 0})
-    url = ADOPTIUM_API.format(ver=ver)
+    url = _quote_download_url(ADOPTIUM_API.format(ver=ver))
     tmp = JAVA_DIR / f".tmp-java-{ver}.tar.gz"
     try:
         JAVA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1794,8 +1794,33 @@ def cmd_mod_versions(args):
           "versions": out})
 
 
+def _quote_download_url(url: str) -> str:
+    """Percent-encode the path and the query of a download URL, exactly once.
+
+    CurseForge returns some file names with raw spaces, brackets or accents,
+    and http.client rejects the request before it leaves the process ("URL
+    can't contain control characters"). Keep the separators and any existing
+    %XX escape, so an already encoded URL comes back unchanged. A literal ?
+    in a file name cannot be told apart from the query separator: it must
+    arrive as %3F, and that escape is preserved.
+    """
+    import urllib.parse
+
+    parts = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]*)(.*)$", url)
+    if not parts:
+        return url
+    prefix, rest = parts.groups()
+    path, sep, query = rest.partition("?")
+    path = urllib.parse.quote(path, safe="/%:@!$&'()*;=-._~")
+    if not sep:
+        return prefix + path
+    query = urllib.parse.quote(query, safe="=&%:@!$'()*+,;/?-._~")
+    return prefix + path + "?" + query
+
+
 def _download_with_progress(url: str, dest: Path, stage: str):
     import urllib.request
+    url = _quote_download_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
     downloaded = 0
     total = 0
