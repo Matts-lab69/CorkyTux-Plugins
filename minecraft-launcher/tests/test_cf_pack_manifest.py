@@ -4,7 +4,6 @@ Uso: python3 -m unittest tests.test_cf_pack_manifest
 """
 import importlib.machinery
 import importlib.util
-import os
 import tempfile
 import unittest
 from pathlib import Path
