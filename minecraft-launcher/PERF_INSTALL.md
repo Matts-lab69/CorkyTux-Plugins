@@ -110,6 +110,75 @@ instead of 168 s.
 - 1.2.0 stays as prepared (URL encoding only). The performance work does not
   enter the 3.2.0 release without approval.
 
+## What the UI cost is (and what it is not)
+
+The `ui` figures (526.9 s, 17.9 s) are a **model**, not a measurement of the
+real application. The harness consumes one event every 50 ms, exactly like
+`pump_to_idle` (`src/backend/plugin_process.rs:655`), but it does not render
+GTK, does not call `drive_progress`, and does not touch the main loop. The
+real app may spend more or less than 50 ms per event on rendering; the 50 ms
+cadence is the hard ceiling either way, and the event count is the stable part
+of the measurement. The plugin wall times (38.29 s, 20.2 s) are real.
+
+## What the throttle preserves
+
+The throttle is in `_install_callbacks` (status and progress) and keeps:
+
+- every terminal event (`done`/`error` is outside the throttle),
+- every change of stage category (manifest, libraries, assets, client jar,
+  java runtime, installation complete),
+- the first event of a burst and the last value when the burst ends,
+- at most one progress event every 0.1 s and one status event every 0.25 s.
+
+It drops intermediate per-file progress and per-file status only. The stage
+text of non-file statuses is unchanged; per-file "Download <name>" statuses
+are coalesced into "Downloading files" / "Extracting files".
+
+## Installing the perf branch locally (code only, state intact)
+
+No game, prefix, save or registry file is touched. Only the plugin entry
+changes.
+
+```
+# 1. record before
+P=~/.local/share/CorkyTux/plugins/minecraft-launcher
+sha256sum "$P/minecraft-launcher" > /tmp/plugin-before.sha256
+# 2. timestamped code backup (the existing .bak-20261011-223733 stays)
+cp -a "$P/minecraft-launcher" "$P/minecraft-launcher.bak-$(date +%Y%m%d-%H%M%S)"
+# 3. build from the perf branch in a worktree you own
+mkdir -p ~/wt
+git -C /home/mattsgaming/CorkyTux-Plugins worktree add ~/wt/a-perf origin/perf/minecraft-install
+cd ~/wt/a-perf
+tools/plugin-tarball.sh minecraft-launcher /tmp/opencode/rel-3.2.0/minecraft-launcher-throttle
+# 4. extract over the installed dir (no delete; tests/ and state stay)
+tar xzf /tmp/opencode/rel-3.2.0/minecraft-launcher-throttle/minecraft-launcher-1.2.0.tar.gz \
+  -C "$P/.."
+# 5. diff
+sha256sum "$P/minecraft-launcher"
+cat /tmp/plugin-before.sha256
+```
+
+Rollback: copy the timestamped backup back over the entry, or reinstall from
+the published 1.2.0 tarball.
+
+## What to compare visually
+
+Use one vanilla instance and one modpack instance, before and after:
+
+- total time from "Installing modpack" to the dialog closing,
+- how the progress bar advances: with the flood it stalls and jumps; with
+  the throttle it moves smoothly,
+- whether the instance is usable afterwards (same files, same launch).
+
+## Alternative tarball (not published)
+
+`minecraft-launcher-1.2.0-throttle.tar.gz` is built from `perf/minecraft-install`
+with the same 1.2.0 version string, so it can be swapped in for testing
+without changing the manifest. sha256:
+`81a6f9e64399149af9b5faa04d14635caa84d96113fad5a0b3a3e5995df84203`.
+It is **not** published and does not replace the 1.2.0 release tarball. The
+decision to ship the throttle in 1.2.0 or 1.3.0 is pending your test.
+
 ## Not measured
 
 - The real CurseForge path and Karmaland (300 mods); no API key. The event
