@@ -451,15 +451,56 @@ def cmd_versions(args):
 LOADERS = ["fabric", "forge", "neoforge", "quilt"]
 
 
+def _progress_stage(stage: str) -> str:
+    """Group per-file statuses so the throttle can coalesce them."""
+    if stage.startswith("Download ") and stage != "Download Assets":
+        return "Downloading files"
+    if stage.startswith("Extract "):
+        return "Extracting files"
+    return stage
+
+
+class _ProgressThrottle:
+    """Emit at most one event per interval, plus every stage change.
+
+    The launcher drains one plugin event every 50 ms (`pump_to_idle`), so
+    forwarding mll's per-file callbacks (thousands for one modpack) keeps
+    the progress dialog open for minutes after the install itself finished.
+    The final value always passes, so the bar still reaches 100%.
+    """
+
+    def __init__(self, interval=0.1, clock=None):
+        self.interval = interval
+        self.clock = clock or time.monotonic
+        self.last = None
+        self.last_stage = None
+
+    def allow(self, stage: str, force: bool = False) -> bool:
+        stage = _progress_stage(stage)
+        now = self.clock()
+        if (force or stage != self.last_stage or self.last is None
+                or now - self.last >= self.interval):
+            self.last = now
+            self.last_stage = stage
+            return True
+        return False
+
+
 def _install_callbacks():
     state = {"max": 1}
+    status_gate = _ProgressThrottle(interval=0.25)
+    progress_gate = _ProgressThrottle(interval=0.1)
 
     def set_status(status):
-        emit({"type": "progress", "stage": status, "percent": None})
+        if status_gate.allow(status, force=status == "Installation complete"):
+            emit({"type": "progress", "stage": _progress_stage(status),
+                  "percent": None})
 
     def set_progress(value):
-        emit({"type": "progress", "stage": "downloading",
-              "percent": _pct(value, state["max"])})
+        final = bool(state["max"]) and value >= state["max"]
+        if progress_gate.allow("downloading", force=final):
+            emit({"type": "progress", "stage": "downloading",
+                  "percent": _pct(value, state["max"])})
 
     def set_max(value):
         state["max"] = value
