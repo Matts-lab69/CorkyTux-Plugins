@@ -1,3 +1,10 @@
 *.AppImage
 __pycache__/
 *.py[cod]
+
+# Agent notes and process docs (kept out of the repo)
+AGENTS.md
+PENDIENTES.md
+*.bundle
+ai-notes/
+ai-notes-backup/
