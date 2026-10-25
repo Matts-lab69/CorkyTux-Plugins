@@ -2190,24 +2190,29 @@ def _cf_pack_manifest(pack_id: str, file_id: str):
     if not url:
         die(3, "CurseForge pack file has no download URL")
     tmp = Path(tempfile.mkdtemp(prefix="cfpack-"))
-    zpath = tmp / "pack.zip"
-    emit({"type": "progress", "stage": "downloading-modpack", "percent": 0})
-    _download_with_progress(url, zpath, "downloading-modpack")
-    dest = tmp / "unzipped"
-    dest.mkdir(parents=True, exist_ok=True)
     try:
-        with zipfile.ZipFile(zpath) as z:
-            z.extractall(dest)
-    except Exception as e:
-        die(3, f"Invalid modpack zip: {e}")
-    manifest_path = dest / "manifest.json"
-    if not manifest_path.is_file():
-        die(3, "Modpack zip has no manifest.json")
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except ValueError:
-        die(3, "Modpack manifest.json is corrupt")
-    return manifest, dest, tmp
+        zpath = tmp / "pack.zip"
+        emit({"type": "progress", "stage": "downloading-modpack", "percent": 0})
+        _download_with_progress(url, zpath, "downloading-modpack")
+        dest = tmp / "unzipped"
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(zpath) as z:
+                z.extractall(dest)
+        except Exception as e:
+            die(3, f"Invalid modpack zip: {e}")
+        manifest_path = dest / "manifest.json"
+        if not manifest_path.is_file():
+            die(3, "Modpack zip has no manifest.json")
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except ValueError:
+            die(3, "Modpack manifest.json is corrupt")
+        return manifest, dest, tmp
+    except SystemExit:
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+        raise
 
 
 def _cf_pack_loader(manifest: dict):
