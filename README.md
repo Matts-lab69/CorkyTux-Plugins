@@ -168,7 +168,7 @@ emulator-manager corky-unlink Dolphin
 
 ### 4. Minecraft Launcher
 
-**Version:** 1.1.1 | **Type:** `Minecraft` | **Capabilities:** `auth`, `versions`, `install`, `loaders`, `launch`, `stop`, `status`, `setup`, `java`, `mods`, `modrinth` | Streaming JSON-lines
+**Version:** 1.2.0 | **Type:** `Minecraft` | **Capabilities:** `auth`, `versions`, `install`, `loaders`, `launch`, `stop`, `status`, `setup`, `java`, `mods`, `modrinth` | Streaming JSON-lines
 
 Minecraft Java: offline / Microsoft / Ely.by accounts, Java 8/17/21/25
 auto-detect (`~/jdk`, `/opt/jvm`, `/usr/lib/jvm`, `update-alternatives`),
@@ -183,7 +183,7 @@ Requires: `python3` + `requests`, `minecraft_launcher_lib`, `psutil` —
 
 ### 5. Heroic Store (Epic/GOG)
 
-**Version:** 1.1.0 | **Type:** `Store` | **Capabilities:** `setup`, `auth`, `library`, `install`, `uninstall`, `launch-info`, `cleanup-stale`, `free-promos`, `epic-deals`, `gog-store-search`, `game-info` — Epic Games + GOG via own `legendary`/`gogdl`
+**Version:** 1.2.0 | **Type:** `Store` | **Capabilities:** `setup`, `auth`, `library`, `install`, `uninstall`, `launch-info`, `cleanup-stale`, `free-promos`, `epic-deals`, `gog-store-search`, `game-info` — Epic Games + GOG via own `legendary`/`gogdl`
 (`setup` downloads them to `plugins/heroic-store/bin/`).
 
 Embedded WebKit Epic login with auto-capture, GOG token auth, library with
