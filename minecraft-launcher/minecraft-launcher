@@ -1959,6 +1959,11 @@ CURSE_BUILTIN_KEY = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZC
 
 def cmd_curse_auth_config(args):
     key = (args.api_key or "").strip()
+    if getattr(args, "api_key_stdin", False) and not key:
+        try:
+            key = (sys.stdin.read() or "").strip()
+        except Exception:
+            key = ""
     show = getattr(args, "show", False)
     if show and not key:
         try:
@@ -2899,6 +2904,7 @@ def main():
 
     p_ccfg = sub.add_parser("curse-auth-config")
     p_ccfg.add_argument("--api-key", default="")
+    p_ccfg.add_argument("--api-key-stdin", action="store_true")
     p_ccfg.add_argument("--show", action="store_true")
     p_ccfg.set_defaults(func=cmd_curse_auth_config)
 
