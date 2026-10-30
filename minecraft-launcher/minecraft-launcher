@@ -1860,14 +1860,16 @@ def _quote_download_url(url: str) -> str:
 
 
 def _download_with_progress(url: str, dest: Path, stage: str):
+    import os as _os
     import urllib.request
     url = _quote_download_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
     downloaded = 0
     total = 0
     last_emit = 0.0
+    tmp = dest.with_name(dest.name + ".corky-part")
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as f:
             try:
                 total = int(resp.headers.get("Content-Length", 0))
             except (TypeError, ValueError):
@@ -1885,13 +1887,20 @@ def _download_with_progress(url: str, dest: Path, stage: str):
                     last_emit = t
                     pct = round(now * 100 / total, 1)
                     emit({"type": "progress", "stage": stage, "percent": pct})
+        if total and downloaded != total:
+            tmp.unlink(missing_ok=True)
+            die(3, f"Truncated download: got {downloaded} of {total} bytes")
+        if tmp.stat().st_size < 1024:
+            tmp.unlink(missing_ok=True)
+            die(3, "Downloaded file too small, aborting")
+        _os.replace(tmp, dest)
+    except SystemExit:
+        tmp.unlink(missing_ok=True)
+        raise
     except Exception as e:
-        if dest.exists():
-            dest.unlink(missing_ok=True)
-        die(3, f"Download failed: {e}")
-    if dest.stat().st_size < 1024:
+        tmp.unlink(missing_ok=True)
         dest.unlink(missing_ok=True)
-        die(3, "Downloaded file too small, aborting")
+        die(3, f"Download failed: {e}")
 
 
 def cmd_mod_install(args):
