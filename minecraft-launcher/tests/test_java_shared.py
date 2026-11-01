@@ -1,5 +1,4 @@
 import importlib.util
-import os
 import stat
 import tempfile
 import unittest
@@ -49,6 +48,36 @@ class JavaSharedTests(unittest.TestCase):
             (bad / "bin" / "java").write_text("#!/bin/sh\nexit 1\n")
             (bad / "bin" / "java").chmod(0o755)
             self.assertEqual(m.existing_java_bin(bad), "")
+
+
+    def test_the_lock_serializes_two_writers(self):
+        import fcntl
+        import multiprocessing
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "java.lock"
+
+            def child(started, order):
+                with open(lock_path, "w") as fh:
+                    fcntl.flock(fh, fcntl.LOCK_EX)
+                    order.put("child")
+                    time.sleep(0.05)
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                    started.set()
+
+            started = multiprocessing.Event()
+            order = multiprocessing.Queue()
+            proc = multiprocessing.Process(target=child, args=(started, order))
+            proc.start()
+            with open(lock_path, "w") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                # While the parent holds the lock the child must not proceed.
+                self.assertTrue(order.empty())
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            proc.join(timeout=5)
+            self.assertEqual(order.get(timeout=1), "child")
+            self.assertTrue(started.is_set())
 
 
 if __name__ == "__main__":
