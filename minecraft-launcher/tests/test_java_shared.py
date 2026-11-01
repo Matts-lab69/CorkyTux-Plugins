@@ -66,9 +66,10 @@ class JavaSharedTests(unittest.TestCase):
                     fcntl.flock(fh, fcntl.LOCK_UN)
                     started.set()
 
-            started = multiprocessing.Event()
-            order = multiprocessing.Queue()
-            proc = multiprocessing.Process(target=child, args=(started, order))
+            ctx = multiprocessing.get_context("fork")
+            started = ctx.Event()
+            order = ctx.Queue()
+            proc = ctx.Process(target=child, args=(started, order))
             proc.start()
             with open(lock_path, "w") as fh:
                 fcntl.flock(fh, fcntl.LOCK_EX)
