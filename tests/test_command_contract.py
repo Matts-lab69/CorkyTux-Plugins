@@ -8,10 +8,10 @@ regenerate the JSON from the protocol table after a deliberate change.
 
 import importlib.util
 import json
-from importlib.machinery import SourceFileLoader
 import pathlib
 import subprocess
 import unittest
+from importlib.machinery import SourceFileLoader
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONTRACT = json.loads((ROOT / "tests" / "command_contract.json").read_text())
