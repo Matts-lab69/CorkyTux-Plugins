@@ -7,8 +7,8 @@ regenerate the JSON from the protocol table after a deliberate change.
 """
 
 import importlib.util
-from importlib.machinery import SourceFileLoader
 import json
+from importlib.machinery import SourceFileLoader
 import pathlib
 import subprocess
 import unittest
