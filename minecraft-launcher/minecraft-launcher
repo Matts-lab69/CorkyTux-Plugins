@@ -1083,6 +1083,28 @@ def _iter_java_candidates():
     return ordered
 
 
+def java_major(ver: str) -> int:
+    """Major number of a Java version string (17, 17.0.9, 1.8 -> 8)."""
+    parts = str(ver).split(".")
+    if parts and parts[0] == "1" and len(parts) > 1:
+        return int(parts[1])
+    return int(parts[0])
+
+
+def java_dir_for(ver: str, base: Path | None = None) -> Path:
+    """One directory per major version under the shared Java base."""
+    return (base or JAVA_DIR) / str(java_major(ver))
+
+
+def existing_java_bin(dest: Path) -> str:
+    """A usable bin/java inside dest, or "" when the directory is absent/bad."""
+    cands = sorted(dest.glob("*/bin/java")) + sorted(dest.glob("bin/java"))
+    for cand in cands:
+        if _java_version_of(str(cand)):
+            return str(cand)
+    return ""
+
+
 def find_compatible_java(required_major: int, max_major: int = 99):
     best = None
     best_major = None
@@ -1167,12 +1189,34 @@ def cmd_java_install(args):
     ver = args.version
     if ver not in JAVA_VERSIONS:
         die(2, f"version must be one of {JAVA_VERSIONS}")
-    dest = JAVA_DIR / ver
+    dest = java_dir_for(ver)
+    existing = existing_java_bin(dest)
+    if existing:
+        state = _read_java_json()
+        installs = state.get("installs", {})
+        installs[ver] = existing
+        state["installs"] = installs
+        if not state.get("selected"):
+            state["selected"] = existing
+        _write_java_json(state)
+        emit({"type": "done", "ok": True, "version": ver, "path": existing,
+              "java_version": _java_version_of(existing), "reused": True})
+        return
     emit({"type": "progress", "stage": f"downloading-java-{ver}", "percent": 0})
     url = _quote_download_url(ADOPTIUM_API.format(ver=ver))
     tmp = JAVA_DIR / f".tmp-java-{ver}.tar.gz"
+    import fcntl
+
+    JAVA_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(JAVA_DIR / ".java.lock", "w")
     try:
-        JAVA_DIR.mkdir(parents=True, exist_ok=True)
+        # One download at a time: two launcher instances share this base.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = existing_java_bin(dest)
+        if existing:
+            emit({"type": "done", "ok": True, "version": ver, "path": existing,
+                  "java_version": _java_version_of(existing), "reused": True})
+            return
         req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
         downloaded = 0
         with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
@@ -1195,6 +1239,11 @@ def cmd_java_install(args):
         tmp.unlink(missing_ok=True)
     except Exception as e:
         die(3, f"Java {ver} download failed: {e}")
+    finally:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        finally:
+            lock.close()
 
     cands = sorted(dest.glob("*/bin/java")) + sorted(dest.glob("bin/java"))
     java_bin = str(cands[0]) if cands else ""
@@ -1860,14 +1909,16 @@ def _quote_download_url(url: str) -> str:
 
 
 def _download_with_progress(url: str, dest: Path, stage: str):
+    import os as _os
     import urllib.request
     url = _quote_download_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": MODRINTH_UA})
     downloaded = 0
     total = 0
     last_emit = 0.0
+    tmp = dest.with_name(dest.name + ".corky-part")
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as f:
             try:
                 total = int(resp.headers.get("Content-Length", 0))
             except (TypeError, ValueError):
@@ -1885,13 +1936,20 @@ def _download_with_progress(url: str, dest: Path, stage: str):
                     last_emit = t
                     pct = round(now * 100 / total, 1)
                     emit({"type": "progress", "stage": stage, "percent": pct})
+        if total and downloaded != total:
+            tmp.unlink(missing_ok=True)
+            die(3, f"Truncated download: got {downloaded} of {total} bytes")
+        if tmp.stat().st_size < 1024:
+            tmp.unlink(missing_ok=True)
+            die(3, "Downloaded file too small, aborting")
+        _os.replace(tmp, dest)
+    except SystemExit:
+        tmp.unlink(missing_ok=True)
+        raise
     except Exception as e:
-        if dest.exists():
-            dest.unlink(missing_ok=True)
-        die(3, f"Download failed: {e}")
-    if dest.stat().st_size < 1024:
+        tmp.unlink(missing_ok=True)
         dest.unlink(missing_ok=True)
-        die(3, "Downloaded file too small, aborting")
+        die(3, f"Download failed: {e}")
 
 
 def cmd_mod_install(args):
@@ -1959,6 +2017,11 @@ CURSE_BUILTIN_KEY = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZC
 
 def cmd_curse_auth_config(args):
     key = (args.api_key or "").strip()
+    if getattr(args, "api_key_stdin", False) and not key:
+        try:
+            key = (sys.stdin.read() or "").strip()
+        except Exception:
+            key = ""
     show = getattr(args, "show", False)
     if show and not key:
         try:
@@ -2899,6 +2962,7 @@ def main():
 
     p_ccfg = sub.add_parser("curse-auth-config")
     p_ccfg.add_argument("--api-key", default="")
+    p_ccfg.add_argument("--api-key-stdin", action="store_true")
     p_ccfg.add_argument("--show", action="store_true")
     p_ccfg.set_defaults(func=cmd_curse_auth_config)
 

@@ -8,12 +8,14 @@ come from Heroic's per-game config on scan.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -75,14 +77,64 @@ GOG_LOGIN_URL = ("https://auth.gog.com/auth?client_id=46899977096215655&"
                  "response_type=code&layout=client2")
 
 
+# Official GitHub release API asset digests, checked on 2026-11-04.
+# These are not standalone checksum files or publisher signatures.
+TOOL_RELEASES = {
+    "legendary": {
+        "url": "https://github.com/legendary-gl/legendary/releases/download/0.21.1/legendary_linux_x64",
+        "sha256": "dbed33bbe96031e65858233e4badf0a1d401bb6cb0cc995d1237cf3a0c826a45",
+    },
+    "gogdl": {
+        "url": "https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/download/v1.4.0/gogdl_linux_x86_64",
+        "sha256": "2aa2b59c83d3bfbe7b60ead91c6297b263b5d1e6c233a04b7409bafe26738f02",
+    },
+}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _managed_tool_valid(name: str, path: Path | None = None) -> bool:
+    path = path or CONFIG_DIR / "bin" / name
+    try:
+        return (path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+                and _sha256_file(path) == TOOL_RELEASES[name]["sha256"])
+    except OSError:
+        return False
+
+
+def _external_binary(names, managed: Path) -> str:
+    """Never relabel an invalid managed file as a system PATH fallback."""
+    for name in names:
+        found = shutil.which(name)
+        if (found and Path(found).resolve() != managed.resolve()
+                and Path(found).is_file() and os.access(found, os.X_OK)):
+            return found
+    return ""
+
+
 def _find_bin(name: str):
-    found = shutil.which(name)
-    if found:
-        return found
-    cand = CONFIG_DIR / "bin" / name
-    if cand.is_file():
-        return str(cand)
-    return str(cand)
+    managed = CONFIG_DIR / "bin" / name
+    if _managed_tool_valid(name, managed):
+        return str(managed)
+    external = _external_binary((name,), managed)
+    if external:
+        return external
+    return "" if managed.exists() else str(managed)
+
+
+def _tool_integrity(name: str, selected: str) -> str:
+    managed = CONFIG_DIR / "bin" / name
+    if selected and Path(selected).resolve() == managed.resolve():
+        return "verified-pinned" if _managed_tool_valid(name, managed) else "invalid-managed"
+    if selected and Path(selected).is_file():
+        return "system-fallback-unverified"
+    return "invalid-managed" if managed.exists() else "missing"
 
 
 LEGENDARY_BIN = _find_bin("legendary")
@@ -114,7 +166,10 @@ def _auth_dbg(msg):
 
 
 def _require_binary(path: str, name: str):
-    if not Path(path).exists() and shutil.which(name) is None:
+    managed = CONFIG_DIR / "bin" / name
+    if path and Path(path).resolve() == managed.resolve() and not _managed_tool_valid(name, managed):
+        die(5, f"{name} managed binary failed verification. Run setup to repair it.")
+    if not (path and Path(path).is_file()):
         die(5, f"{name} not found. Run `setup` to download it, or place it at {path}")
 
 
@@ -126,30 +181,40 @@ def cmd_setup(_args):
     bindir = CONFIG_DIR / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     got, failed = [], []
-    jobs = [
-        ("legendary", bindir / "legendary",
-         "https://github.com/legendary-gl/legendary/releases/latest/download/legendary_linux_x64"),
-        ("gogdl", bindir / "gogdl",
-         "https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/latest/download/gogdl_linux_x86_64"),
-    ]
-    for name, dest, url in jobs:
-        if dest.is_file() or shutil.which(name):
-            got.append(f"{name} (already present)")
+    for name, release in TOOL_RELEASES.items():
+        dest = bindir / name
+        if _managed_tool_valid(name, dest):
+            got.append(f"{name} (pinned release verified)")
             continue
         emit({"type": "progress", "stage": f"downloading-{name}", "percent": None})
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
-            with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
-                shutil.copyfileobj(resp, f)
+            _download_verified(release["url"], dest, release["sha256"])
             os.chmod(dest, 0o755)
-            got.append(name)
+            got.append(f"{name} (pinned release verified)")
         except Exception as e:
-            if dest.exists():
-                dest.unlink(missing_ok=True)
             failed.append(f"{name}: {e}")
-    if failed and not got:
+    if failed:
         die(3, "Setup failed: " + "; ".join(failed))
     emit({"type": "done", "ok": True, "installed": got, "failed": failed})
+
+
+def _download_verified(url: str, dest: Path, expected: str) -> None:
+    """Verify bytes before replacing a managed executable, even when PATH has one."""
+    import urllib.request
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("Invalid pinned SHA-256 metadata")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
+    temporary = Path(name)
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "CorkyTux/3.0"})
+        with os.fdopen(fd, "wb") as output, urllib.request.urlopen(request, timeout=300) as response:
+            shutil.copyfileobj(response, output)
+        if _sha256_file(temporary) != expected:
+            raise ValueError("SHA-256 mismatch; installation aborted")
+        os.replace(temporary, dest)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_json(path: Path):
@@ -341,10 +406,12 @@ def cmd_bins(_args):
     """I only report binary presence here, no network: I use this for the
     lightweight dependency-modal precheck. I apply the same condition as
     `cmd_status`, without any session."""
-    epic_bin = Path(LEGENDARY_BIN).exists() or shutil.which("legendary") is not None
-    gog_bin = Path(GOGDL_BIN).exists() or shutil.which("gogdl") is not None
+    integrity = {"legendary": _tool_integrity("legendary", LEGENDARY_BIN),
+                 "gogdl": _tool_integrity("gogdl", GOGDL_BIN)}
+    epic_bin = integrity["legendary"] in ("verified-pinned", "system-fallback-unverified")
+    gog_bin = integrity["gogdl"] in ("verified-pinned", "system-fallback-unverified")
     emit({"type": "done", "ok": True,
-          "bins": {"legendary": epic_bin, "gogdl": gog_bin}})
+          "bins": {"legendary": epic_bin, "gogdl": gog_bin}, "integrity": integrity})
 
 
 def cmd_status(args):
@@ -354,8 +421,10 @@ def cmd_status(args):
         if cached is not None:
             emit({"type": "done", "ok": True, **cached, "cached": True})
             return
-    epic_bin = Path(LEGENDARY_BIN).exists() or shutil.which("legendary") is not None
-    gog_bin = Path(GOGDL_BIN).exists() or shutil.which("gogdl") is not None
+    integrity = {"legendary": _tool_integrity("legendary", LEGENDARY_BIN),
+                 "gogdl": _tool_integrity("gogdl", GOGDL_BIN)}
+    epic_bin = integrity["legendary"] in ("verified-pinned", "system-fallback-unverified")
+    gog_bin = integrity["gogdl"] in ("verified-pinned", "system-fallback-unverified")
     epic_logged = False
     epic_name = ""
     if epic_bin:
@@ -376,6 +445,7 @@ def cmd_status(args):
             if not gog_name:
                 gog_logged = False
     payload = {
+          "integrity": integrity,
           "bins": {"epic": epic_bin, "gog": gog_bin},
           "logged": {"epic": epic_logged, "gog": gog_logged},
           "accounts": {"epic": epic_name, "gog": gog_name},
@@ -3471,67 +3541,118 @@ def cmd_eos_code(_args):
 
 UMU_DIR = Path.home() / ".local" / "share" / "CorkyTux" / "tools" / "umu"
 UMU_BIN = UMU_DIR / "umu"
+UMU_MANIFEST = UMU_DIR / ".verified-install.json"
+UMU_RELEASE = {
+    "url": "https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar",
+    "sha256": "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48cc851",
+}
+
+
+def _umu_managed_valid() -> bool:
+    try:
+        if (UMU_DIR.is_symlink() or UMU_BIN.is_symlink() or UMU_MANIFEST.is_symlink()
+                or UMU_DIR.stat().st_mode & 0o077 or UMU_MANIFEST.stat().st_mode & 0o077):
+            return False
+        manifest = json.loads(UMU_MANIFEST.read_text())
+        if not isinstance(manifest, dict):
+            return False
+        return (manifest.get("archive_sha256") == UMU_RELEASE["sha256"]
+                and manifest.get("binary_sha256") == _sha256_file(UMU_BIN)
+                and UMU_BIN.is_file() and os.access(UMU_BIN, os.X_OK))
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _umu_bin():
-    found = shutil.which("umu-run") or shutil.which("umu")
-    if found:
-        return found
-    if UMU_BIN.is_file() and os.access(UMU_BIN, os.X_OK):
+    if _umu_managed_valid():
         return str(UMU_BIN)
-    return ""
+    return _external_binary(("umu-run", "umu"), UMU_BIN)
 
 
 def cmd_umu_status(_args):
-    emit({"type": "done", "ok": True, "available": bool(_umu_bin()),
-          "path": _umu_bin()})
+    path = _umu_bin()
+    verified = bool(path) and Path(path).resolve() == UMU_BIN.resolve() and _umu_managed_valid()
+    integrity = ("verified" if verified else "external runner; unverified" if path
+                 else "invalid-managed" if UMU_BIN.exists() else "missing")
+    emit({"type": "done", "ok": True, "available": bool(path), "path": path,
+          "verified": verified, "integrity": integrity})
 
 
 def cmd_umu_setup(_args):
     import urllib.request
-    if _umu_bin():
-        emit({"type": "done", "ok": True, "path": _umu_bin(),
-              "note": "already installed"})
+    if _umu_managed_valid():
+        emit({"type": "done", "ok": True, "path": str(UMU_BIN),
+              "note": "pinned archive and installed binary verified"})
         return
+    if UMU_DIR.is_symlink():
+        die(3, "umu install directory is a symlink")
     UMU_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(UMU_DIR, 0o700)
     emit({"type": "progress", "stage": "fetching-umu-release", "percent": None})
     try:
-        req = urllib.request.Request(
-            "https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest",
-            headers={"User-Agent": "CorkyTux/3.0", "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            rel = json.loads(resp.read().decode())
-        asset = next((a for a in rel.get("assets", [])
-                      if "zipapp.tar" in a.get("name", "")), None)
-        if not asset:
-            die(2, "No umu zipapp in the latest release")
         emit({"type": "progress", "stage": "downloading-umu", "percent": 0})
-        import tarfile
-        import tempfile
-        tmp = Path(tempfile.mkdtemp(prefix="umu-"))
-        try:
+        with tempfile.TemporaryDirectory(prefix="umu-") as temporary:
+            tmp = Path(temporary)
             tgz = tmp / "umu.tar"
-            req = urllib.request.Request(asset["browser_download_url"],
+            req = urllib.request.Request(UMU_RELEASE["url"],
                                          headers={"User-Agent": "CorkyTux/3.0"})
             with urllib.request.urlopen(req, timeout=300) as resp, open(tgz, "wb") as f:
                 shutil.copyfileobj(resp, f)
-            with tarfile.open(tgz) as t:
-                t.extractall(tmp, filter="data")
-            cand = next((p for p in tmp.rglob("umu*")
-                         if p.is_file() and os.access(p, os.X_OK)
-                         and p.suffix not in (".tar", ".gz")), None)
-            if not cand:
-                cand = next((p for p in tmp.rglob("*")
-                             if p.is_file() and p.name == "umu"), None)
-            if not cand:
-                die(3, "umu binary not found inside the release tarball")
-            shutil.copy2(cand, UMU_BIN)
-            os.chmod(UMU_BIN, 0o755)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            if _sha256_file(tgz) != UMU_RELEASE["sha256"]:
+                raise ValueError("umu archive SHA-256 mismatch; installation aborted")
+            runner = _safe_extract_tar(tgz, tmp / "extract")
+            # One unique staging directory owns all descriptors and files;
+            # exceptions before manifest creation cannot leak its descriptor.
+            with tempfile.TemporaryDirectory(prefix=".install-", dir=UMU_DIR) as stage_name:
+                stage = Path(stage_name)
+                staged = stage / "umu"
+                shutil.copyfile(runner, staged)
+                os.chmod(staged, 0o755)
+                manifest = {"archive_sha256": UMU_RELEASE["sha256"],
+                            "binary_sha256": _sha256_file(staged)}
+                manifest_path = stage / "manifest.json"
+                fd = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as output:
+                    json.dump(manifest, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(staged, UMU_BIN)
+                os.replace(manifest_path, UMU_MANIFEST)
     except Exception as e:
         die(3, f"umu install failed: {e}")
     emit({"type": "done", "ok": True, "path": str(UMU_BIN)})
+
+
+def _safe_extract_tar(archive_path: Path, destination: Path) -> Path:
+    """Read the exact regular zipapp, never extract archive links or other files."""
+    import posixpath
+    import tarfile
+    with tarfile.open(archive_path) as archive:
+        runners = []
+        for member in archive.getmembers():
+            name = member.name.rstrip("/")
+            if (name.startswith("/") or ".." in name.split("/")
+                    or not (name == "umu" or name.startswith("umu/"))):
+                raise ValueError("unsafe path in umu archive")
+            if member.issym():
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(name), member.linkname))
+                if member.linkname.startswith("/") or not target.startswith("umu/"):
+                    raise ValueError("unsafe symlink in umu archive")
+                continue
+            if member.islnk() or not (member.isfile() or member.isdir()):
+                raise ValueError("unsupported member in umu archive")
+            if name == "umu/umu-run" and member.isfile():
+                runners.append(member)
+        if len(runners) != 1:
+            raise ValueError("verified umu archive requires exactly one regular umu/umu-run")
+        source = archive.extractfile(runners[0])
+        if source is None:
+            raise ValueError("cannot read umu-run from verified archive")
+        destination.mkdir(parents=True, exist_ok=True)
+        runner = destination / "umu-run"
+        with source, runner.open("xb") as output:
+            shutil.copyfileobj(source, output)
+        return runner
 
 
 def cmd_free_promos(_args):

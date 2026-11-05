@@ -10,6 +10,7 @@ Run: python3 tests/test_gog_install.py (stdlib, no pytest, no network).
 import importlib.machinery
 import importlib.util
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,15 @@ def load():
     spec = importlib.util.spec_from_loader("heroic_store", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
+    # Tests mock the backend processes, but presence checks must not depend on
+    # real user installations (or accept an invalid managed binary).
+    binaries = tempfile.TemporaryDirectory(prefix="heroic-test-bins-")
+    unittest.addModuleCleanup(binaries.cleanup)
+    for name in ("legendary", "gogdl"):
+        path = Path(binaries.name) / name
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+        setattr(mod, "LEGENDARY_BIN" if name == "legendary" else "GOGDL_BIN", str(path))
     return mod
 
 
