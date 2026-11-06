@@ -48,6 +48,17 @@ directory:
   ./heroic-store status   # checks binaries + session
   ```
 
+`setup` installs pinned Legendary 0.21.1 and gogdl 1.4.0 releases and checks
+the SHA-256 digests published for those assets in their respective official
+GitHub release API metadata before replacing managed binaries. Existing
+managed files are checked again even when system binaries are on `PATH`; a
+verified managed binary takes priority. A system binary is only an unverified
+fallback when no valid managed binary exists, and status labels it accordingly.
+umu setup pins umu 1.4.4, checks the official release asset digest before
+extracting its exact `umu/umu-run` member, and stores a private manifest that
+binds the installed executable digest to that verified archive. A valid
+managed umu likewise takes priority over a system runner.
+
 ## Log in
 
 ### Epic Games (embedded login)

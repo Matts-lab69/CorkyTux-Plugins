@@ -1,0 +1,494 @@
+{
+ "appimage-launcher": [
+  {
+   "command": "scan",
+   "flags": []
+  },
+  {
+   "command": "status",
+   "flags": []
+  },
+  {
+   "command": "icon",
+   "flags": [
+    "--out"
+   ]
+  },
+  {
+   "command": "integrate",
+   "flags": []
+  },
+  {
+   "command": "run",
+   "flags": []
+  }
+ ],
+ "rpgmaker-runtime": [
+  {
+   "command": "scan",
+   "flags": []
+  },
+  {
+   "command": "status",
+   "flags": []
+  },
+  {
+   "command": "install",
+   "flags": []
+  },
+  {
+   "command": "run",
+   "flags": []
+  },
+  {
+   "command": "stop",
+   "flags": []
+  },
+  {
+   "command": "session-status",
+   "flags": []
+  },
+  {
+   "command": "sessions",
+   "flags": []
+  },
+  {
+   "command": "runtime-remove",
+   "flags": []
+  },
+  {
+   "command": "config-show",
+   "flags": []
+  },
+  {
+   "command": "diagnose",
+   "flags": []
+  }
+ ],
+ "heroic-store": [
+  {
+   "command": "status",
+   "flags": []
+  },
+  {
+   "command": "setup",
+   "flags": []
+  },
+  {
+   "command": "bins",
+   "flags": []
+  },
+  {
+   "command": "umu-status",
+   "flags": []
+  },
+  {
+   "command": "heroic-scan",
+   "flags": []
+  },
+  {
+   "command": "eos-code",
+   "flags": []
+  },
+  {
+   "command": "free-promos",
+   "flags": []
+  },
+  {
+   "command": "gog-rail",
+   "flags": [
+    "--list"
+   ]
+  },
+  {
+   "command": "auth",
+   "flags": [
+    "--store"
+   ]
+  },
+  {
+   "command": "library",
+   "flags": [
+    "--store"
+   ]
+  },
+  {
+   "command": "installed-status",
+   "flags": [
+    "--store"
+   ]
+  },
+  {
+   "command": "epic-deals",
+   "flags": [
+    "--start",
+    "--count"
+   ]
+  },
+  {
+   "command": "gog-store-search",
+   "flags": [
+    "--query",
+    "--limit"
+   ]
+  },
+  {
+   "command": "install",
+   "flags": [
+    "--store",
+    "--app-id"
+   ]
+  },
+  {
+   "command": "uninstall",
+   "flags": [
+    "--store",
+    "--app-id"
+   ]
+  },
+  {
+   "command": "cleanup-stale",
+   "flags": [
+    "--store",
+    "--app-id"
+   ]
+  },
+  {
+   "command": "launch-info",
+   "flags": [
+    "--store",
+    "--app-id"
+   ]
+  },
+  {
+   "command": "game-info",
+   "flags": [
+    "--store",
+    "--app-id"
+   ]
+  },
+  {
+   "command": "refresh-library",
+   "flags": [
+    "--store",
+    "--lang"
+   ]
+  },
+  {
+   "command": "logout",
+   "flags": [
+    "--store"
+   ]
+  },
+  {
+   "command": "umu-setup",
+   "flags": []
+  }
+ ],
+ "minecraft-launcher": [
+  {
+   "command": "status",
+   "flags": [
+    "--mc-dir"
+   ]
+  },
+  {
+   "command": "setup",
+   "flags": []
+  },
+  {
+   "command": "offline",
+   "flags": [
+    "--name"
+   ]
+  },
+  {
+   "command": "unaccount",
+   "flags": [
+    "--account"
+   ]
+  },
+  {
+   "command": "java-detect",
+   "flags": []
+  },
+  {
+   "command": "java-use",
+   "flags": [
+    "--path"
+   ]
+  },
+  {
+   "command": "manifest-java",
+   "flags": [
+    "--mc-version"
+   ]
+  },
+  {
+   "command": "java-required",
+   "flags": [
+    "--version",
+    "--mc-dir"
+   ]
+  },
+  {
+   "command": "auth-config",
+   "flags": [
+    "--show",
+    "--client-id"
+   ]
+  },
+  {
+   "command": "versions",
+   "flags": []
+  },
+  {
+   "command": "ely-auth",
+   "flags": [
+    "--probe",
+    "--username",
+    "--password-stdin"
+   ]
+  },
+  {
+   "command": "ely-refresh",
+   "flags": [
+    "--account"
+   ]
+  },
+  {
+   "command": "ely-validate",
+   "flags": [
+    "--account"
+   ]
+  },
+  {
+   "command": "ely-skin",
+   "flags": [
+    "--name"
+   ]
+  },
+  {
+   "command": "mods-list",
+   "flags": []
+  },
+  {
+   "command": "mod-toggle",
+   "flags": [
+    "--file"
+   ]
+  },
+  {
+   "command": "mods-add",
+   "flags": [
+    "--path"
+   ]
+  },
+  {
+   "command": "addons-list",
+   "flags": [
+    "--addon-type"
+   ]
+  },
+  {
+   "command": "mod-search",
+   "flags": [
+    "--query",
+    "--project-type",
+    "--mc-version",
+    "--loader",
+    "--limit"
+   ]
+  },
+  {
+   "command": "mod-versions",
+   "flags": [
+    "--project-id",
+    "--mc-version",
+    "--loader",
+    "--project-type"
+   ]
+  },
+  {
+   "command": "mod-project",
+   "flags": [
+    "--project-id"
+   ]
+  },
+  {
+   "command": "mod-check-updates",
+   "flags": [
+    "--addon-type",
+    "--mc-version",
+    "--loader"
+   ]
+  },
+  {
+   "command": "mod-match",
+   "flags": [
+    "--addon-type",
+    "--mc-dir"
+   ]
+  },
+  {
+   "command": "mod-update",
+   "flags": [
+    "--file",
+    "--addon-type"
+   ]
+  },
+  {
+   "command": "loader-versions",
+   "flags": [
+    "--loader",
+    "--mc-version",
+    "--loaders"
+   ]
+  },
+  {
+   "command": "cf-search",
+   "flags": [
+    "--query",
+    "--kind",
+    "--mc-version",
+    "--loader",
+    "--limit"
+   ]
+  },
+  {
+   "command": "cf-versions",
+   "flags": [
+    "--mod-id",
+    "--mc-version",
+    "--loader",
+    "--kind"
+   ]
+  },
+  {
+   "command": "cf-project",
+   "flags": [
+    "--mod-id"
+   ]
+  },
+  {
+   "command": "curse-auth-config",
+   "flags": [
+    "--show",
+    "--api-key-stdin",
+    "--api-key"
+   ]
+  },
+  {
+   "command": "curse-test",
+   "flags": []
+  },
+  {
+   "command": "instance-delete",
+   "flags": [
+    "--version",
+    "--mc-dir"
+   ]
+  },
+  {
+   "command": "stop",
+   "flags": []
+  },
+  {
+   "command": "install",
+   "flags": [
+    "--version"
+   ]
+  },
+  {
+   "command": "launch",
+   "flags": [
+    "--version",
+    "--max-memory-mb"
+   ]
+  },
+  {
+   "command": "java-install",
+   "flags": [
+    "--version"
+   ]
+  },
+  {
+   "command": "auth",
+   "flags": []
+  },
+  {
+   "command": "mod-install",
+   "flags": [
+    "--project-id",
+    "--addon-type"
+   ]
+  },
+  {
+   "command": "modpack-install",
+   "flags": [
+    "--project-id"
+   ]
+  },
+  {
+   "command": "cf-install",
+   "flags": [
+    "--mod-id",
+    "--kind",
+    "--addon-type"
+   ]
+  },
+  {
+   "command": "cf-modpack-install",
+   "flags": [
+    "--pack-id"
+   ]
+  },
+  {
+   "command": "modpack-import",
+   "flags": [
+    "--path",
+    "--mc-dir"
+   ]
+  }
+ ],
+ "dependency-installer": [
+  {
+   "command": "scan",
+   "flags": []
+  },
+  {
+   "command": "install",
+   "flags": [
+    "--prefix"
+   ]
+  }
+ ],
+ "dll-overrides-automator": [
+  {
+   "command": "scan",
+   "flags": []
+  }
+ ],
+ "emulator-manager": [
+  {
+   "command": "corky-list",
+   "flags": []
+  },
+  {
+   "command": "corky-install",
+   "flags": []
+  },
+  {
+   "command": "corky-link",
+   "flags": []
+  },
+  {
+   "command": "corky-remove",
+   "flags": []
+  },
+  {
+   "command": "corky-unlink",
+   "flags": []
+  }
+ ]
+}

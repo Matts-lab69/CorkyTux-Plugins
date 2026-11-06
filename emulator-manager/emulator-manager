@@ -15,11 +15,14 @@ Commands:
   corky-linked                - List only linked emulators
 """
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -380,38 +383,92 @@ def unlink_emulator(name):
     return {"ok": False, "message": name + " not linked"}
 
 
-def find_download_url(name):
-    """Find the latest AppImage download URL from GitHub."""
+def _github_release(github):
+    """Fetch one release metadata response; its asset digest stays paired with its URL."""
+    api_url = f"https://api.github.com/repos/{github}/releases/latest"
+    req = urllib.request.Request(api_url)
+    req.add_header("User-Agent", "CorkyTux/2.10")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _parse_official_digest(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("GitHub asset digest is malformed")
+    match = re.fullmatch(r"(sha256|sha512):([0-9a-fA-F]+)", value)
+    if not match:
+        raise ValueError("GitHub asset digest uses an unsupported or malformed format")
+    algorithm, hexdigest = match.groups()
+    expected_length = 64 if algorithm == "sha256" else 128
+    if len(hexdigest) != expected_length:
+        raise ValueError("GitHub asset digest has an invalid hexadecimal length")
+    return algorithm, hexdigest.lower()
+
+
+_ARCH_TOKENS = re.compile(
+    r"(?<![a-z0-9])(?:aarch64|arm64|armhf|armv\d+[a-z]?|armel|arm32|"
+    r"x86_64|amd64|x64|i[3-6]86|x86|riscv64|ppc64le|ppc64|s390x)(?![a-z0-9])")
+_X86_ASSET_ARCHES = {"x86_64", "amd64", "x64", "x86", "i386", "i486",
+                     "i586", "i686"}
+_ARM64_ASSET_ARCHES = {"aarch64", "arm64"}
+
+
+def _asset_arch_family(asset_name):
+    tokens = {token.lower() for token in _ARCH_TOKENS.findall(asset_name)}
+    families = set()
+    if tokens & _X86_ASSET_ARCHES:
+        families.add("x86_64")
+    if tokens & _ARM64_ASSET_ARCHES:
+        families.add("aarch64")
+    other = tokens - _X86_ASSET_ARCHES - _ARM64_ASSET_ARCHES
+    if other:
+        families.add("other")
+    if len(families) > 1:
+        return "ambiguous"
+    return next(iter(families)) if families else None
+
+
+def find_download_asset(name):
+    """Select latest matching AppImage plus digest from same release response."""
     info = EMULATORS.get(name)
     if not info:
         return None, "Unknown emulator: " + name
     github = info["github"]
     pattern = info["asset_pattern"]
     arch = get_arch()
-    api_url = f"https://api.github.com/repos/{github}/releases/latest"
     try:
-        req = urllib.request.Request(api_url)
-        req.add_header("User-Agent", "CorkyTux/2.10")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-            for asset in data.get("assets", []):
-                aname = asset.get("name", "")
-                if (aname.endswith(".AppImage")
-                        and pattern.lower() in aname.lower()
-                        and not aname.endswith(".zsync")):
-                    if arch == "x86_64" and "aarch64" in aname.lower():
-                        continue
-                    if arch == "aarch64" and "x86_64" in aname.lower():
-                        continue
-                    return asset["browser_download_url"], None
-            for asset in data.get("assets", []):
-                aname = asset.get("name", "")
-                if aname.endswith(".AppImage") and not aname.endswith(".zsync"):
-                    if arch == "x86_64" and "aarch64" in aname.lower():
-                        continue
-                    if arch == "aarch64" and "x86_64" in aname.lower():
-                        continue
-                    return asset["browser_download_url"], None
+        data = _github_release(github)
+        assets = [asset for asset in data.get("assets", [])
+                  if asset.get("name", "").endswith(".AppImage")
+                  and not asset.get("name", "").endswith(".zsync")]
+        if arch == "x86_64":
+            target_arch = "x86_64"
+        elif arch == "aarch64":
+            target_arch = "aarch64"
+        else:
+            target_arch = arch
+        tagged = [a for a in assets if _asset_arch_family(a.get("name", "")) == target_arch]
+        untagged = [a for a in assets if _asset_arch_family(a.get("name", "")) is None]
+        for strict in (True, False):
+            exact = [a for a in tagged
+                     if not strict or pattern.lower() in a.get("name", "").lower()]
+            generic = [a for a in untagged
+                       if not strict or pattern.lower() in a.get("name", "").lower()]
+            if exact:
+                asset = exact[0]
+            elif len(generic) == 1:
+                asset = generic[0]
+            else:
+                continue
+            aname = asset.get("name", "")
+            try:
+                digest = _parse_official_digest(asset.get("digest"))
+            except ValueError as e:
+                return None, f"Invalid official checksum for {aname}: {e}"
+            return {"url": asset["browser_download_url"], "name": aname,
+                    "digest": asset.get("digest"), "parsed_digest": digest}, None
         return None, f"No {arch} AppImage found in latest release of {github}"
     except urllib.error.HTTPError as e:
         return None, f"GitHub API error ({e.code}): {github}"
@@ -419,31 +476,62 @@ def find_download_url(name):
         return None, "Failed to fetch release info: " + str(e)
 
 
+def find_download_url(name):
+    """Compatibility wrapper returning the selected asset URL."""
+    asset, error = find_download_asset(name)
+    return (asset["url"] if asset else None), error
+
+
+def _download_appimage(url, dest, digest):
+    """Download beside destination, verify official digest, then atomically replace."""
+    parsed = _parse_official_digest(digest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix="." + os.path.basename(dest) + ".",
+                                     suffix=".part", dir=os.path.dirname(dest))
+    digestor = hashlib.new(parsed[0]) if parsed else None
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "CorkyTux/2.10")
+        with os.fdopen(fd, "wb") as output, urllib.request.urlopen(req, timeout=300) as resp:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                output.write(chunk)
+                if digestor:
+                    digestor.update(chunk)
+        verified = digestor is not None
+        if verified and digestor.hexdigest() != parsed[1]:
+            raise ValueError("official checksum mismatch")
+        os.chmod(temp_path, os.stat(temp_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        os.replace(temp_path, dest)
+        return {"ok": True, "verified": verified,
+                "warning": "" if verified else "No official checksum published; downloaded bytes are unverified."}
+    except Exception as e:
+        return {"ok": False, "verified": False, "message": "Download failed: " + str(e)}
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
 def install_emulator(name):
     """Download and install an emulator AppImage."""
     if is_installed(name):
         return {"ok": True, "message": name + " already installed"}
-    url, err = find_download_url(name)
+    asset, err = find_download_asset(name)
     if err:
         return {"ok": False, "message": err}
     os.makedirs(EMULATORS_DIR, exist_ok=True)
     dest = os.path.join(EMULATORS_DIR, name + ".AppImage")
-    try:
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", "CorkyTux/2.10")
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        return {"ok": True, "message": name + " installed to " + dest}
-    except Exception as e:
-        if os.path.exists(dest):
-            os.remove(dest)
-        return {"ok": False, "message": "Download failed: " + str(e)}
+    result = _download_appimage(asset["url"], dest, asset["digest"])
+    if not result["ok"]:
+        return {"ok": False, "message": result["message"]}
+    message = name + " installed to " + dest
+    if result["warning"]:
+        message += " — " + result["warning"]
+    return {"ok": True, "message": message, "verified": result["verified"]}
 
 
 def remove_emulator(name):

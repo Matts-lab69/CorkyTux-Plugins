@@ -32,6 +32,13 @@ Manage retro emulators from one place. Install AppImages or link your existing i
 
 The plugin downloads the latest AppImage from GitHub releases.
 
+When GitHub's release API provides a well-formed SHA-256 or SHA-512 asset
+digest, the plugin verifies it before atomically replacing the installed
+AppImage. If the publisher provides no digest, installation continues with an
+explicit warning that the bytes are unverified. These API digests are release
+publisher metadata, not an upstream emulator signature; some catalog entries
+are third-party AppImage packaging repositories.
+
 ```bash
 emulator-manager corky-install Dolphin
 ```
