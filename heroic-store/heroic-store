@@ -175,7 +175,6 @@ def _require_binary(path: str, name: str):
 
 def cmd_setup(_args):
     import platform as _plat
-    import urllib.request
     if _plat.machine() not in ("x86_64", "AMD64"):
         die(2, f"Auto-download only supports x86_64 (this is {_plat.machine()}). Install legendary/gogdl manually.")
     bindir = CONFIG_DIR / "bin"

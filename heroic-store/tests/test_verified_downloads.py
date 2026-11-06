@@ -1,8 +1,7 @@
+import hashlib
 import importlib.machinery
 import importlib.util
-import hashlib
 import io
-import json
 import tarfile
 import tempfile
 import unittest

@@ -1,7 +1,6 @@
 import fcntl
 import importlib.util
 import multiprocessing
-import os
 import stat
 import tempfile
 import unittest

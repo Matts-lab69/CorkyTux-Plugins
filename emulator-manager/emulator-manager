@@ -15,13 +15,13 @@ Commands:
   corky-linked                - List only linked emulators
 """
 
-import json
 import hashlib
+import json
 import os
+import re
 import shutil
 import stat
 import sys
-import re
 import tempfile
 import urllib.error
 import urllib.request
