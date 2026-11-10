@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 from contextlib import ExitStack, suppress
 from pathlib import Path
@@ -16,7 +17,7 @@ from box.launch.profiles import ProfileCatalog
 from box.models import EngineName, GameInfo
 from box.paths import AppPaths, open_directory_without_symlinks
 
-BWRAP = Path("/usr/bin/bwrap")
+BWRAP = Path(shutil.which("bwrap") or "/usr/bin/bwrap")
 
 _X11_SOCKET_DIR = Path("/tmp/.X11-unix")
 _DRI_DIR = Path("/dev/dri")
@@ -59,7 +60,7 @@ class Sandbox:
         try:
             if not BWRAP.is_file() or not os.access(BWRAP, os.X_OK):
                 raise LaunchError(
-                    "Bubblewrap (/usr/bin/bwrap) is required; refusing unsandboxed execution"
+                    "Bubblewrap (bwrap in PATH or /usr/bin/bwrap) is required; refusing unsandboxed execution"
                 )
             self.options = [
                 str(BWRAP),
