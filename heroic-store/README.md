@@ -102,6 +102,13 @@ Terminal fallback (if the embedded window fails):
 | Search Epic | Button opening the browser (Epic has no public search API) | — |
 | GOG details | Game sheet | `./heroic-store game-info --store gog --app-id ID` (description only arrives via gameDetails) |
 
+GOG editorial rails (`gog-rail --list sale|new|free`) use a versioned,
+one-hour cache. `--refresh` always attempts the public catalog. On network
+failure, valid same-version cache up to seven days old can be returned,
+including an empty list, with `cached`, `stale` and `partial` set to true
+and a warning that prices may be outdated. Older or invalid cache is ignored.
+Cache writes use unique temporary files and atomic replacement.
+
 ## Install and play
 
 1. Press **Install** on the sheet (or `install --store epic --app-id ID [--path DIR]`).

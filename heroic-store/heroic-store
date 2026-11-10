@@ -3346,6 +3346,8 @@ def cmd_gog_store_search(args):
 # list. The UI never hits the network directly, so the price rate-limit
 # is covered by construction. Refresh forces with --refresh.
 GOG_RAIL_TTL = 3600
+# Stale prices are explicitly marked and never retained beyond seven days.
+GOG_RAIL_STALE_MAX_AGE = 7 * 24 * 3600
 # Rail pool version: when the caps change I invalidate the old cache
 # without waiting out the TTL (the get rejects a different version).
 GOG_RAIL_POOL_V = 1
@@ -3363,29 +3365,56 @@ def _gog_rail_cache_dir() -> Path:
     return d
 
 
-def _gog_rail_cache_get(nombre: str):
+def _gog_rail_cache_get(nombre: str, *, allow_stale: bool = False):
+    if nombre not in GOG_RAIL_QUERIES:
+        raise ValueError(f"unknown rail: {nombre}")
     try:
-        data = json.loads((_gog_rail_cache_dir() / f"{nombre}.json").read_text())
+        import math
         import time as _t
-        if _t.time() - float(data.get("ts", 0)) <= float(data.get("ttl", GOG_RAIL_TTL)):
-            if data.get("v", 0) != GOG_RAIL_POOL_V:
-                return None
-            items = data.get("items")
-            if isinstance(items, list):
-                return items
-    except (OSError, ValueError, TypeError):
+        data = json.loads((_gog_rail_cache_dir() / f"{nombre}.json").read_text())
+        if not isinstance(data, dict) or data.get("v") != GOG_RAIL_POOL_V:
+            return None
+        timestamp = float(data.get("ts", 0))
+        ttl = float(data.get("ttl", GOG_RAIL_TTL))
+        age = _t.time() - timestamp
+        if not all(math.isfinite(x) for x in (timestamp, ttl, age)):
+            return None
+        if age < 0 or ttl < 0:
+            return None
+        max_age = GOG_RAIL_STALE_MAX_AGE if allow_stale else min(ttl, GOG_RAIL_TTL)
+        items = data.get("items")
+        if age <= max_age and isinstance(items, list):
+            return items
+    except (OSError, ValueError, TypeError, OverflowError):
         pass
     return None
 
 
 def _gog_rail_cache_set(nombre: str, items: list) -> None:
+    if nombre not in GOG_RAIL_QUERIES:
+        raise ValueError(f"unknown rail: {nombre}")
+    import tempfile
+    import time as _t
+    temporary = None
     try:
-        import time as _t
-        (_gog_rail_cache_dir() / f"{nombre}.json").write_text(
-            json.dumps({"ts": _t.time(), "ttl": GOG_RAIL_TTL,
-                        "v": GOG_RAIL_POOL_V, "items": items}))
-    except OSError:
+        directory = _gog_rail_cache_dir()
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                         prefix=f".{nombre}-", suffix=".tmp",
+                                         delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump({"ts": _t.time(), "ttl": GOG_RAIL_TTL,
+                       "v": GOG_RAIL_POOL_V, "items": items}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / f"{nombre}.json")
+    except (OSError, ValueError, TypeError):
         pass
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _gog_rail_fetch(query: str, limit: int):
@@ -3463,20 +3492,23 @@ def cmd_gog_rail(args):
     nombre = (args.list or "").strip()
     if nombre not in GOG_RAIL_QUERIES:
         die(2, f"unknown rail: {nombre} (sale|new|free)")
+    fallback = _gog_rail_cache_get(nombre, allow_stale=True)
     if not getattr(args, "refresh", False):
         hit = _gog_rail_cache_get(nombre)
         if hit is not None:
             emit({"type": "done", "ok": True, "store": "gog", "rail": nombre,
                   "items": hit, "partial": False, "warning": "",
-                  "cached": True})
+                  "cached": True, "stale": False})
             return
     query, limit, top = GOG_RAIL_QUERIES[nombre]
     try:
         prods = _gog_rail_fetch(query, limit)
     except Exception as e:
         emit({"type": "done", "ok": True, "store": "gog", "rail": nombre,
-              "items": [], "partial": True,
-              "warning": f"rail failed: {e}", "cached": False})
+              "items": fallback if fallback is not None else [], "partial": True,
+              "warning": (f"Stale cached results; prices may be outdated. Rail failed: {e}"
+                          if fallback is not None else f"rail failed: {e}"),
+              "cached": fallback is not None, "stale": fallback is not None})
         return
     items = []
     mal = 0
@@ -3504,7 +3536,7 @@ def cmd_gog_rail(args):
     _gog_rail_cache_set(nombre, items)
     emit({"type": "done", "ok": True, "store": "gog", "rail": nombre,
           "items": items, "partial": bool(advertencia),
-          "warning": advertencia, "cached": False})
+          "warning": advertencia, "cached": False, "stale": False})
 
 
 def cmd_eos_code(_args):
