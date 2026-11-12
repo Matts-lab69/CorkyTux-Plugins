@@ -1,7 +1,7 @@
 """Guard the remaining explicitly translated regression-test vocabulary."""
-from pathlib import Path
 import re
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
