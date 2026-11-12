@@ -1,13 +1,13 @@
-"""Tests sin red del install de NeoForge/26.3 via _base.install (opcion a).
+"""Offline NeoForge/26.3 installation tests through _base.install (option a).
 
-Cubre:
-- neoforge/26.3: la ruta legacy se usa (eff=1.26.3 != 26.3), llama a
+Coverage:
+- neoforge/26.3: the legacy path (eff=1.26.3 != 26.3) calls
   install_minecraft_version(vanilla) + _base.install + get_installed_version.
-- neoforge/1.21.1: spelling directo -> camino normal ml.install.
-- fabric/26.3: spelling directo -> camino normal ml.install.
-- mll sin _base: AttributeError visible, nunca silencioso.
+- neoforge/1.21.1: direct version spelling -> normal ml.install path.
+- fabric/26.3: direct version spelling -> normal ml.install path.
+- mll without _base: visible AttributeError, never silently ignored.
 
-Uso: python3 tests/test_install_legacy.py (stdlib, sin red).
+Usage: python3 tests/test_install_legacy.py (stdlib, no network).
 """
 import importlib.machinery
 import importlib.util
@@ -76,7 +76,7 @@ class InstallLegacyTests(unittest.TestCase):
         type(self).events = self.events
         self.vanilla_installs = []
         type(self).vanilla_installs = self.vanilla_installs
-        # mll con install.install_minecraft_version registrando lo que instala
+        # mll records versions passed to install.install_minecraft_version.
         fake_install = types.SimpleNamespace(
             install_minecraft_version=lambda v, d, callback=None: type(self).vanilla_installs.append(v))
         self.m.mll = types.SimpleNamespace(
@@ -93,13 +93,13 @@ class InstallLegacyTests(unittest.TestCase):
 
 class NeoForgeLegacyInstallTests(InstallLegacyTests):
     def test_neoforge_26_3_uses_legacy_base_path(self):
-        # 26.3 solo matchea via "1.26.3" -> camino _base, no wrapper
+        # 26.3 matches only through "1.26.3" -> _base path, not the wrapper.
         self.loader = FakeLoader(
             {"1.26.3"}, {"1.26.3": "26.3.0.51-beta"},
             base=FakeBase("neoforge-26.3.0.51-beta"))
         self.m.cmd_install(self._args("26.3", "neoforge"))
         self.assertEqual(self.loader.wrapper_install_calls, [],
-                         "wrapper install() NO se usa en la ruta legacy")
+                         "wrapper install() must not be used on the legacy path")
         self.assertIsNotNone(self.loader._base)
         self.assertEqual(self.loader._base.install_calls[0][0], "26.3",
                          "vanilla real: 26.3, no 1.26.3")
@@ -114,7 +114,7 @@ class NeoForgeLegacyInstallTests(InstallLegacyTests):
         self.assertEqual(doc["loader"], "neoforge")
 
     def test_beta_loader_version_flows_into_done(self):
-        # id terminado en -beta (build beta) instalado por la misma via
+        # An ID ending in -beta (beta build) uses the same installation path.
         self.loader = FakeLoader(
             {"1.26.3"}, {"1.26.3": "26.3.0.51-beta"},
             base=FakeBase("neoforge-26.3.0.51-beta"))
@@ -131,7 +131,7 @@ class NeoForgeLegacyInstallTests(InstallLegacyTests):
         self.assertEqual(self.loader._base.install_calls[0][3], "26.3.0.50")
 
     def test_mll_without_base_fails_loudly(self):
-        # mll viejo sin _base.install: error explicito, no silencioso
+        # Old mll without _base.install: explicit error, not silently ignored.
         self.loader = FakeLoader({"1.26.3"}, {"1.26.3": "26.3.0.51-beta"}, base=None)
         with self.assertRaises(SystemExit):
             self.m.cmd_install(self._args("26.3", "neoforge"))
@@ -140,14 +140,14 @@ class NeoForgeLegacyInstallTests(InstallLegacyTests):
 
 class DirectSpellingInstallTests(InstallLegacyTests):
     def test_neoforge_1_21_1_uses_wrapper(self):
-        # id legacy ya normalizado -> wrapper normal, sin _base
+        # Already normalized legacy ID -> normal wrapper, without _base.
         self.loader = FakeLoader(
             {"1.21.1"}, {"1.21.1": "21.1.218"},
             base=FakeBase("neoforge-21.1.218"))
         self.m.cmd_install(self._args("1.21.1", "neoforge"))
         self.assertEqual(self.loader.wrapper_install_calls, [("1.21.1", "21.1.218")])
         self.assertEqual(self.loader._base.install_calls, [],
-                         "_base no se toca en la ruta directa")
+                         "_base must not be used on the direct path")
         self.assertEqual(self.vanilla_installs, [])
 
     def test_fabric_26_3_uses_wrapper(self):

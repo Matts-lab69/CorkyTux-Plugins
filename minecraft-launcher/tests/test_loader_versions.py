@@ -1,13 +1,13 @@
-"""Tests sin red del verbo loader-versions (fase 1.3c).
+"""Offline loader-versions command tests (phase 1.3c).
 
-Cubre:
-- modo por lote --loaders a,b,c: un solo "done" con todas las respuestas
-  en el orden pedido, errores por loader capturados en "errors".
-- workaround NeoForge/26.3: _probe_mc prueba "1."+mc cuando el loader
-  no reconoce el id de version moderno (mll normaliza a "1.x").
-- modo individual --loader conserva el formato de respuesta previo.
+Coverage:
+- Batch --loaders a,b,c: one "done" with all responses in request order,
+  collecting per-loader failures in "errors".
+- NeoForge/26.3 workaround: _probe_mc tries "1."+mc when the loader does
+  not recognize the modern version ID (mll normalizes to "1.x").
+- Single --loader mode preserves the previous response format.
 
-Uso: python3 tests/test_loader_versions.py (stdlib, sin red).
+Usage: python3 tests/test_loader_versions.py (stdlib, no network).
 """
 import importlib.machinery
 import importlib.util
@@ -68,8 +68,8 @@ class LoaderVersionsTests(unittest.TestCase):
 
 class BatchTests(LoaderVersionsTests):
     def test_batch_answers_all_requested_loaders_in_order(self):
-        # fabric soporta 26.3 directo; neoforge solo via "1.26.3"
-        # (workaround); quilt explota al listar -> error visible.
+        # Fabric supports 26.3 directly; NeoForge only through "1.26.3"
+        # (workaround); Quilt listing raises -> visible error.
         self._set({
             "fabric": FakeLoader(["26.3"], {"26.3": ["0.19.5"]},
                                  {"26.3": "0.19.5"}),
@@ -79,7 +79,7 @@ class BatchTests(LoaderVersionsTests):
         })
         self.m.cmd_loader_versions(
             self._ns(loaders="fabric,neoforge,quilt"))
-        self.assertEqual(len(self.events), 1, "un solo done en un arranque")
+        self.assertEqual(len(self.events), 1, "one done event per invocation")
         doc = self.events[0]
         self.assertTrue(doc["ok"])
         self.assertEqual(doc["mc_version"], "26.3")
@@ -90,9 +90,9 @@ class BatchTests(LoaderVersionsTests):
         self.assertTrue(fabric["supported"])
         self.assertEqual(fabric["versions"], ["0.19.5"])
         neo = doc["loaders"][1]
-        self.assertTrue(neo["supported"], "workaround 1.26.3 debe marcar soporte")
+        self.assertTrue(neo["supported"], "the 1.26.3 workaround must report support")
         self.assertEqual(neo["mc_version_matched"], "1.26.3")
-        self.assertIn("quilt", doc["errors"], "fallo del loader, nunca silencioso")
+        self.assertIn("quilt", doc["errors"], "loader failure must never be silent")
         self.assertNotIn("fabric", doc["errors"])
         self.assertNotIn("neoforge", doc["errors"])
 
@@ -113,22 +113,22 @@ class BatchTests(LoaderVersionsTests):
 
 class WorkaroundTests(LoaderVersionsTests):
     def test_neoforge_26_3_resolved_through_legacy_spelling(self):
-        # mll normaliza a "1.x": "26.3" nunca esta en get_minecraft_versions
-        # de NeoForge aunque "1.26.3" si. _probe_mc debe probar el prefijo.
+        # mll normalizes to "1.x": "26.3" never occurs in get_minecraft_versions
+        # for NeoForge, unlike "1.26.3". _probe_mc must try the prefix.
         neo = FakeLoader(["1.26.3"], {"1.26.3": ["26.3.0.51-beta"]},
                          {"1.26.3": "26.3.0.51-beta"})
         self.assertEqual(self.m._probe_mc(neo, "26.3"), "1.26.3")
         self.assertEqual(self.m._probe_mc(neo, "1.26.3"), "1.26.3",
-                         "ids legacy directos quedan igual")
+                         "direct legacy IDs remain unchanged")
         self.assertIsNone(self.m._probe_mc(neo, "26.9"),
-                          "sin pareja legacy -> unsupported")
+                          "no matching legacy version -> unsupported")
 
     def test_supported_direct_version_untouched(self):
         fab = FakeLoader(["26.3"], {"26.3": ["0.19.5"]}, {"26.3": "0.19.5"})
         self.assertEqual(self.m._probe_mc(fab, "26.3"), "26.3")
 
     def test_single_mode_reports_false_when_neither_spelling_matches(self):
-        # Neoforge para una version que no existe ni legacy ni moderna.
+        # NeoForge version absent from both legacy and modern catalogs.
         self._set({"fabric": FakeLoader([], {}, {})})
         self.m.cmd_loader_versions(self._ns(loader="fabric"))
         doc = self.events[0]
@@ -145,7 +145,7 @@ class WorkaroundTests(LoaderVersionsTests):
         self.assertEqual(doc["versions"], ["0.19.5"])
         self.assertEqual(doc["latest"], "0.19.5")
         self.assertEqual(doc["loader"], "fabric")
-        # el workaround tambien vale en modo individual
+        # The workaround also applies in single-loader mode.
         neo = FakeLoader(["1.26.3"], {"1.26.3": ["26.3.0.51-beta"]},
                          {"1.26.3": "26.3.0.51-beta"})
         self._set({"neoforge": neo})

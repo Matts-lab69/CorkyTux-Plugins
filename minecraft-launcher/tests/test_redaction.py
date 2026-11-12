@@ -1,8 +1,8 @@
 """Redaction tests: no secret may reach a log, a message or a protocol event.
 
-Un test por patron, mas los tests de integracion (argv, die).
+One test per pattern, plus integration tests for argv and die.
 
-Uso: python3 -m unittest tests.test_redaction
+Usage: python3 -m unittest tests.test_redaction
 """
 import contextlib
 import importlib.machinery
