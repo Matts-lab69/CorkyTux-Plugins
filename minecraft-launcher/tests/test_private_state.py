@@ -1,6 +1,6 @@
 """Private-state tests for accounts.json, the CurseForge key and launch logs.
 
-Uso: python3 -m unittest tests.test_private_state
+Usage: python3 -m unittest tests.test_private_state
 """
 import importlib.machinery
 import importlib.util

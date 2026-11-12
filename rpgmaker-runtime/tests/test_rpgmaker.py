@@ -41,7 +41,7 @@ class DetectHint(unittest.TestCase):
             p.write_text("{}" if f.endswith(".json") else "x")
         return base
 
-    def test_mz_antes_que_mv(self):
+    def test_mz_takes_precedence_over_mv(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = self._mk(tmp,
                 files=("index.html", "js/plugins.js", "js/rmmz_core.js",
@@ -62,14 +62,14 @@ class DetectHint(unittest.TestCase):
             base = self._mk(tmp, files=("RPG_RT.ini", "RPG_RT.ldb", "RPG_RT.lmt"))
             self.assertEqual(self.m.detect_engine_hint(base)["engine"], "2k3")
 
-    def test_xp_no_soportado(self):
+    def test_xp_is_unsupported(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = self._mk(tmp, files=("Game.ini", "Data/Scripts.rvdata2"),
                              dirs=("Data",))
             got = self.m.detect_engine_hint(base)
             self.assertEqual(got["engine"], "unsupported")
 
-    def test_desconocido(self):
+    def test_unknown_game(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(
                 self.m.detect_engine_hint(Path(tmp))["engine"], "unknown")
@@ -95,7 +95,7 @@ class ApiRuntime(unittest.TestCase):
             self.assertEqual(self.m._api_first_available("nwjs"), "v0.117.0")
             self.assertIn("fetch_nwjs_available", ba.call_args.args[0][0])
 
-    def test_first_available_vacio_falla(self):
+    def test_first_available_empty_fails(self):
         import json
         fake = self._proc(0, json.dumps({"versions": []}))
         with mock.patch.object(self.m, "_box_api", return_value=fake):
@@ -111,7 +111,7 @@ class ApiRuntime(unittest.TestCase):
         self.assertEqual(nw, ["v0.117.0 x64 /r/nw"])
         self.assertEqual(er, ["0.8.1 x64 /r/er"])
 
-    def test_runtime_lines_basura_falla(self):
+    def test_runtime_lines_garbage_fails(self):
         fake = self._proc(0, "not-json{{{")
         with mock.patch.object(self.m, "_box_api", return_value=fake):
             with self.assertRaises(SystemExit):
@@ -123,15 +123,15 @@ class NeedsX11(unittest.TestCase):
     def setUpClass(cls):
         cls.m = load()
 
-    def test_sin_display(self):
+    def test_without_display(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(self.m._needs_x11())
 
-    def test_x11_puro(self):
+    def test_pure_x11(self):
         with mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
             self.assertTrue(self.m._needs_x11())
 
-    def test_wayland_con_socket(self):
+    def test_wayland_with_socket(self):
         with tempfile.TemporaryDirectory() as tmp:
             sock = Path(tmp) / "wayland-0"
             sock.write_text("")
@@ -140,30 +140,30 @@ class NeedsX11(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 self.assertFalse(self.m._needs_x11())
 
-    def _juego_2k3(self, base):
-        d = Path(base) / "juego"
+    def _game_2k3(self, base):
+        d = Path(base) / "game"
         d.mkdir()
         for n in ("RPG_RT.ini", "RPG_RT.ldb", "RPG_RT.lmt"):
             (d / n).write_text("x")
         return str(d)
 
-    def test_2k3_en_wayland_pide_x11(self):
+    def test_2k3_on_wayland_requests_x11(self):
         with tempfile.TemporaryDirectory() as tmp:
             sock = Path(tmp) / "wayland-0"
             sock.write_text("")
-            juego = self._juego_2k3(tmp)
+            game = self._game_2k3(tmp)
             env = {"DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-0",
                    "XDG_RUNTIME_DIR": tmp}
             with mock.patch.dict(os.environ, env, clear=True):
-                self.assertTrue(self.m._needs_x11(juego))
+                self.assertTrue(self.m._needs_x11(game))
 
-    def test_2k3_en_x11_puro_pide_x11(self):
+    def test_2k3_on_pure_x11_requests_x11(self):
         with tempfile.TemporaryDirectory() as tmp:
-            juego = self._juego_2k3(tmp)
+            game = self._game_2k3(tmp)
             with mock.patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True):
-                self.assertTrue(self.m._needs_x11(juego))
+                self.assertTrue(self.m._needs_x11(game))
 
-    def test_no_2k3_en_wayland_no_pide_x11(self):
+    def test_other_engine_on_wayland_does_not_request_x11(self):
         with tempfile.TemporaryDirectory() as tmp:
             sock = Path(tmp) / "wayland-0"
             sock.write_text("")
@@ -172,11 +172,11 @@ class NeedsX11(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 self.assertFalse(self.m._needs_x11(tmp))
 
-    def test_2k3_sin_display_no_pide_x11(self):
+    def test_2k3_without_display_does_not_request_x11(self):
         with tempfile.TemporaryDirectory() as tmp:
-            juego = self._juego_2k3(tmp)
+            game = self._game_2k3(tmp)
             with mock.patch.dict(os.environ, {}, clear=True):
-                self.assertFalse(self.m._needs_x11(juego))
+                self.assertFalse(self.m._needs_x11(game))
 
 
 class RunForwarding(unittest.TestCase):
@@ -211,20 +211,20 @@ class RunForwarding(unittest.TestCase):
                       "--allow-game-writes"):
                 self.assertIn(f, got["launch"])
 
-    def test_x11_solo_en_x11(self):
+    def test_x11_flag_only_on_x11(self):
         with tempfile.TemporaryDirectory() as tmp:
             got = self._run(tmp, (), {"DISPLAY": ":0"})
             self.assertIn("--x11", got["launch"])
             got2 = self._run(tmp, (), {})
             self.assertNotIn("--x11", got2["launch"])
 
-    def test_copy_root_file_repetible(self):
+    def test_copy_root_file_is_repeatable(self):
         with tempfile.TemporaryDirectory() as tmp:
             got = self._run(tmp, ("--copy-root-file", "a.csv",
                                   "--copy-root-file", "b.csv"))
             self.assertEqual(got["launch"].count("--copy-root-file"), 2)
 
-    def test_autoriza_raiz(self):
+    def test_authorizes_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             got = self._run(tmp)
             self.assertIn("allowed-game-root", got["box_calls"][0])
@@ -255,7 +255,7 @@ class SessionStatus(unittest.TestCase):
         self.assertEqual(got["state"], "running")
         self.assertEqual(got["sessions"], ["s1"])
 
-    def test_exited_con_codigo(self):
+    def test_exited_with_code(self):
         import json
         import tempfile
         self._out = json.dumps({"state": "exited", "codes": {"s1": 3}})
@@ -264,7 +264,7 @@ class SessionStatus(unittest.TestCase):
         self.assertEqual(got["state"], "exited")
         self.assertEqual(got["codes"], {"s1": 3})
 
-    def test_desconocido_si_rc_distinto(self):
+    def test_unknown_on_other_return_code(self):
         import subprocess
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,7 +275,7 @@ class SessionStatus(unittest.TestCase):
                     self.m.cmd_session_status([tmp])
         self.assertEqual(em.call_args.args[0]["state"], "unknown")
 
-    def test_timeout_emite_timeout(self):
+    def test_timeout_emits_timeout(self):
         import subprocess
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,7 +286,7 @@ class SessionStatus(unittest.TestCase):
                     self.m.cmd_session_status([tmp])
         self.assertEqual(em.call_args.args[0]["state"], "timeout")
 
-    def test_desconocido_si_basura(self):
+    def test_unknown_on_garbage(self):
         import subprocess
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -309,7 +309,7 @@ class AvailableParsing(unittest.TestCase):
         import re
         return re.findall(r"^\s*\d+\.\s+(\S+)", out, flags=re.MULTILINE)
 
-    def test_con_tamano(self):
+    def test_with_size(self):
         self.assertEqual(
             self._versions("Available NW.js versions (page 1, x64):\n"
                            "  1. v0.117.0 (195.7 MB)\n  2. v0.116.0 (194.9 MB)\n"),
@@ -320,7 +320,7 @@ class AvailableParsing(unittest.TestCase):
             self._versions("  1. 0.8.1 (5.9 MB)\n"),
             ["0.8.1"])
 
-    def test_formato_viejo_sigue(self):
+    def test_old_format_remains_supported(self):
         self.assertEqual(self._versions("  1. 0.8.1\n"), ["0.8.1"])
 
 
@@ -346,14 +346,14 @@ class SessionCommands(unittest.TestCase):
             payload = em.call_args.args[0]
             self.assertEqual((payload["sessions"], payload["identifier"]), (["a"], "id1"))
 
-    def test_sessions_fallo(self):
+    def test_sessions_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = self._proc(1, "", "boom")
             with mock.patch.object(self.m, "_box_api", return_value=fake):
                 with self.assertRaises(SystemExit):
                     self.m.cmd_sessions([tmp])
 
-    def test_sessions_sin_path(self):
+    def test_sessions_without_path(self):
         with self.assertRaises(SystemExit):
             self.m.cmd_sessions([])
 
@@ -367,7 +367,7 @@ class SessionCommands(unittest.TestCase):
                     self.m.cmd_stop([tmp])
             self.assertEqual(em.call_args.args[0]["stopped"], ["a"])
 
-    def test_runtime_remove_uso(self):
+    def test_runtime_remove_usage(self):
         with self.assertRaises(SystemExit):
             self.m.cmd_runtime_remove(["nwjs"])
         with self.assertRaises(SystemExit):

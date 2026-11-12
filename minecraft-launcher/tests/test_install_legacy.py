@@ -102,11 +102,11 @@ class NeoForgeLegacyInstallTests(InstallLegacyTests):
                          "wrapper install() must not be used on the legacy path")
         self.assertIsNotNone(self.loader._base)
         self.assertEqual(self.loader._base.install_calls[0][0], "26.3",
-                         "vanilla real: 26.3, no 1.26.3")
+                         "actual vanilla: 26.3, not 1.26.3")
         self.assertEqual(self.loader._base.install_calls[0][3], "26.3.0.51-beta")
         self.assertEqual(self.vanilla_installs,
                          ["26.3", "neoforge-26.3.0.51-beta"],
-                         "vanilla primero, luego el id final del loader")
+                         "vanilla first, then the final loader ID")
         doc = self.events[-1]
         self.assertTrue(doc["ok"])
         self.assertEqual(doc["version"], "neoforge-26.3.0.51-beta")

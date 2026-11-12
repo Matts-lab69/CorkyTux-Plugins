@@ -1,6 +1,6 @@
 """_cf_pack_manifest must not leak its cfpack-* temp dir on failure.
 
-Uso: python3 -m unittest tests.test_cf_pack_manifest
+Usage: python3 -m unittest tests.test_cf_pack_manifest
 """
 import importlib.machinery
 import importlib.util

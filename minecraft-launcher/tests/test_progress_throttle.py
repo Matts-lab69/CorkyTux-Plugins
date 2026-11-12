@@ -1,6 +1,6 @@
 """The progress stream must not outrun the launcher's 50 ms event pump.
 
-Uso: python3 -m unittest tests.test_progress_throttle
+Usage: python3 -m unittest tests.test_progress_throttle
 """
 import importlib.machinery
 import importlib.util
