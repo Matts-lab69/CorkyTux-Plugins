@@ -1,10 +1,10 @@
-"""Tests sin red del update atomico de mods (fase 1.3b).
+"""Offline atomic mod update tests (phase 1.3b).
 
-Cada mod se descarga a `<nombre>.corky-part` y solo al completar se hace
-os.replace sobre el destino: si la descarga falla, el jar anterior queda
-intacto (tambien en update in-place, dest == old).
+Each mod downloads to `<name>.corky-part`; os.replace updates the destination
+only after completion. A failed download preserves the previous jar,
+including in-place updates where dest == old.
 
-Uso: python3 tests/test_mod_update.py (stdlib, sin red).
+Usage: python3 tests/test_mod_update.py (stdlib, no network).
 """
 import importlib.machinery
 import importlib.util
@@ -53,7 +53,7 @@ class AtomicUpdate(unittest.TestCase):
              "version_number": "1.0", "title": "M"}))
         return mods
 
-    def test_mismo_nombre_fallo_conserva_jar(self):
+    def test_same_name_failure_preserves_jar(self):
         with tempfile.TemporaryDirectory() as tmp:
             mods = self._env(tmp)
             events = []
@@ -69,7 +69,7 @@ class AtomicUpdate(unittest.TestCase):
             rec = json.loads((mods / "viejo.jar.corky.json").read_text())
             self.assertEqual(rec["version_id"], "v1")
 
-    def test_mismo_nombre_exito_reemplaza(self):
+    def test_same_name_success_replaces_jar(self):
         with tempfile.TemporaryDirectory() as tmp:
             mods = self._env(tmp)
             events = []
@@ -88,7 +88,7 @@ class AtomicUpdate(unittest.TestCase):
             done = [e for e in events if e.get("type") == "done"][-1]
             self.assertTrue(done["updated"])
 
-    def test_nombre_distinto_fallo_no_toca_old(self):
+    def test_different_name_failure_preserves_old_jar(self):
         with tempfile.TemporaryDirectory() as tmp:
             mods = self._env(tmp)
             with mock.patch.object(self.m, "_mr_project_versions",
@@ -102,7 +102,7 @@ class AtomicUpdate(unittest.TestCase):
             self.assertFalse((mods / "nuevo.jar").exists())
             self.assertFalse((mods / "nuevo.jar.corky-part").exists())
 
-    def test_nombre_distinto_exito_mueve_sidecar(self):
+    def test_different_name_success_moves_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
             mods = self._env(tmp)
             def fake_dl(url, dest, stage):
