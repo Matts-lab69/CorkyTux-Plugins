@@ -62,7 +62,13 @@ class EntrypointSubprocessContract(unittest.TestCase):
                 events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
                 self.assertTrue(events, "entrypoint must emit its actual JSON protocol")
                 if expected_error:
-                    self.assertTrue(any(expected_error in str(event.get("error", "")) for event in events))
+                    # RPG fail() emits the JSON-lines error envelope consumed by
+                    # Launcher plugin_process: type=error and message, not error.
+                    self.assertEqual(events, [{
+                        "ok": False,
+                        "type": "error",
+                        "message": f"{expected_error}: {replacements['missing']}",
+                    }])
                 else:
                     self.assertTrue(any(event.get("ok") is True for event in events), result.stdout)
 
