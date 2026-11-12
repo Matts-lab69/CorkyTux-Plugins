@@ -1,6 +1,6 @@
 """The Ely.by password must travel on stdin, never in the command line.
 
-Uso: python3 -m unittest tests.test_ely_password
+Usage: python3 -m unittest tests.test_ely_password
 """
 import importlib.machinery
 import importlib.util

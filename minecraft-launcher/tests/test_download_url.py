@@ -1,6 +1,6 @@
 """Download URLs must be percent-encoded once, before the request leaves.
 
-Uso: python3 -m unittest tests.test_download_url
+Usage: python3 -m unittest tests.test_download_url
 """
 import importlib.machinery
 import importlib.util
